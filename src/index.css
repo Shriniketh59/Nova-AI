@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+@keyframes nova-thinking-fade {
+  0%, 100% { opacity: 0.25; transform: scale(0.92); }
+  50% { opacity: 1; transform: scale(1.08); }
+}
+
+.animate-nova-thinking {
+  animation: nova-thinking-fade 1.1s ease-in-out infinite;
+}

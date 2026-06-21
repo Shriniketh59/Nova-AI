@@ -1,0 +1,5 @@
+Nova AI is a state-of-the-art research platform designed to automate peer review and semantic literature search.
+It supports advanced document indexing for Retrieval-Augmented Generation (RAG) using Gemini embeddings.
+The system configurations allow adjusting hyperparameters for transformer-based neural decoupling gates.
+The founder of Nova AI is Dr. Elena Rostova, who established the project in early 2026.
+The primary goal is to accelerate biomedical and quantum computing research by 40% through real-time agentic collaboration.
