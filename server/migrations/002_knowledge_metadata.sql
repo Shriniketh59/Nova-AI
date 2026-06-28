@@ -9,6 +9,18 @@ ALTER TABLE uploaded_files
   ADD COLUMN IF NOT EXISTS qdrant_collection TEXT,
   ADD COLUMN IF NOT EXISTS source_url TEXT;
 
+-- document_chunks was never added to 001_initial_schema.sql, so Postgres
+-- installs had no table for it (silently falling back to the JSON store
+-- on every chunk insert). Create it here so the ALTERs below have a target.
+CREATE TABLE IF NOT EXISTS document_chunks (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  file_id UUID NOT NULL REFERENCES uploaded_files(id) ON DELETE CASCADE,
+  content TEXT NOT NULL,
+  embedding JSONB NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_file_id ON document_chunks(file_id);
+
 -- document_chunks keeps its JSON embedding column for the current local
 -- fallback path. Once Qdrant is live, this table holds metadata only and
 -- the vector itself moves to Qdrant's payload+vector store.

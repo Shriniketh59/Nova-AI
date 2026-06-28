@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon --ignore nova_ai_db.json src/index.js"
+    "dev": "nodemon --ignore nova_ai_db.json src/index.js",
+    "test": "cross-env NODE_ENV=test vitest run"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -19,6 +20,9 @@
     "pg": "^8.11.5"
   },
   "devDependencies": {
-    "nodemon": "^3.1.0"
+    "nodemon": "^3.1.0",
+    "vitest": "^2.1.4",
+    "supertest": "^7.0.0",
+    "cross-env": "^7.0.3"
   }
 }

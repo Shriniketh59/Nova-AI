@@ -27,8 +27,8 @@ export default function Sidebar({ onLogout }) {
     <aside className="w-64 bg-[#0B0B0F] border-r border-white/5 flex flex-col h-screen text-zinc-300 flex-shrink-0 hidden md:flex transition-all duration-300">
       {/* Top area: New Chat button */}
       <div className="p-3">
-        <NavLink 
-          to="/" 
+        <NavLink
+          to="/"
           className="flex items-center space-x-3 w-full bg-white/5 hover:bg-white/10 text-zinc-100 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors duration-200"
         >
           <img src="/logo.png" alt="Nova AI" className="w-6 h-6 object-contain rounded-md" />
@@ -57,7 +57,7 @@ export default function Sidebar({ onLogout }) {
               >
                 {chat.title}
               </button>
-              
+
               <button
                 onClick={async (e) => {
                   e.stopPropagation();
@@ -105,7 +105,7 @@ export default function Sidebar({ onLogout }) {
           </svg>
           <span>Settings</span>
         </NavLink>
-        
+
         <div className="flex items-center space-x-3 px-3 py-2 mt-1 rounded-lg hover:bg-white/5 cursor-pointer transition-colors" onClick={onLogout}>
           <div className="w-7 h-7 rounded-full bg-zinc-800 border border-white/10 flex items-center justify-center text-[10px] font-semibold text-white">
             JD

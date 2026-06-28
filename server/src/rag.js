@@ -1,18 +1,22 @@
 import fs from 'fs';
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const pdfParse = require('pdf-parse');
+import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 import dotenv from 'dotenv';
 import pool from './db.js';
+import { getCachedEmbedding, setCachedEmbedding } from './jobs/cache.js';
 
 dotenv.config();
 
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
 const OLLAMA_EMBED_MODEL = process.env.OLLAMA_EMBED_MODEL || 'all-minilm';
 
-// Generate embedding for a given text via local Ollama
+// Generate embedding for a given text via local Ollama. Cached — the same
+// text (a repeated chunk on re-upload, a repeated query) always embeds to
+// the same vector, so a cache hit skips the Ollama round-trip entirely.
 export async function generateEmbedding(text) {
+  const cached = getCachedEmbedding(text);
+  if (cached) return cached;
+
   try {
     const res = await fetch(`${OLLAMA_URL}/api/embeddings`, {
       method: 'POST',
@@ -21,6 +25,7 @@ export async function generateEmbedding(text) {
     });
     if (!res.ok) throw new Error(`Ollama embeddings error: ${res.status}`);
     const data = await res.json();
+    setCachedEmbedding(text, data.embedding);
     return data.embedding;
   } catch (err) {
     console.error("Embedding generation error:", err);
@@ -72,24 +77,44 @@ export function chunkText(text, chunkSize = 800, chunkOverlap = 150) {
   return chunks;
 }
 
-// Parse document text based on mime-type
+// Parse document text based on mime-type. PDFs return { text, pages } so
+// chunking can stamp each chunk with the real page number for source
+// grounding citations — other formats have no page concept, pages stays null.
 export async function parseDocument(filePath, mimeType) {
   try {
     const dataBuffer = fs.readFileSync(filePath);
     if (mimeType === 'application/pdf') {
-      const data = await pdfParse(dataBuffer);
-      return data.text;
+      const parser = new PDFParse({ data: dataBuffer });
+      const result = await parser.getText();
+      await parser.destroy();
+      return { text: result.text, pages: result.pages.map(p => p.text) };
     } else if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
       const { value } = await mammoth.extractRawText({ buffer: dataBuffer });
-      return value;
+      return { text: value, pages: null };
     } else {
       // Handles text/plain, text/markdown, text/csv, etc.
-      return dataBuffer.toString('utf8');
+      return { text: dataBuffer.toString('utf8'), pages: null };
     }
   } catch (err) {
     console.error(`Error parsing file ${filePath}:`, err);
     throw err;
   }
+}
+
+// Chunks each page separately when page text is available, stamping every
+// chunk with its real page_number — falls back to whole-text chunking
+// (page_number null) for formats without pages.
+export function chunkWithPages(parsed, chunkSize = 800, chunkOverlap = 150) {
+  if (!parsed.pages) {
+    return chunkText(parsed.text, chunkSize, chunkOverlap).map(content => ({ content, page_number: null }));
+  }
+  const out = [];
+  parsed.pages.forEach((pageText, idx) => {
+    for (const content of chunkText(pageText, chunkSize, chunkOverlap)) {
+      out.push({ content, page_number: idx + 1 });
+    }
+  });
+  return out;
 }
 
 // Cosine similarity between two vectors
@@ -138,6 +163,39 @@ export async function fetchChunksForChat(chatId) {
     ...chunk,
     original_filename: filenameByFileId.get(chunk.file_id) || 'unknown document'
   }));
+}
+
+// Shared by semanticSearch.js's Qdrant path, which needs file ids to filter
+// the collection-wide search down to this chat's own uploads (Qdrant has no
+// chat_id column — file_id is the join key already used everywhere else).
+export async function fetchFileIdsForChat(chatId) {
+  const messagesRes = await pool.query('SELECT id FROM messages WHERE chat_id = $1', [chatId]);
+  if (messagesRes.rowCount === 0) return [];
+  const messageIds = messagesRes.rows.map(m => m.id);
+  const filesRes = await pool.query(
+    'SELECT id FROM uploaded_files WHERE message_id = ANY($1::uuid[])',
+    [messageIds]
+  );
+  return filesRes.rows.map(f => f.id);
+}
+
+// Image uploads skip chunking/embedding (see /api/upload), so the routing
+// engine needs a separate lookup to know "this chat has an attached image" —
+// same message_id join as fetchChunksForChat, just filtered to image/* mime.
+export async function fetchImagesForChat(chatId) {
+  const messagesRes = await pool.query(
+    'SELECT id FROM messages WHERE chat_id = $1',
+    [chatId]
+  );
+  if (messagesRes.rowCount === 0) return [];
+
+  const messageIds = messagesRes.rows.map(m => m.id);
+
+  const filesRes = await pool.query(
+    "SELECT id, original_filename, mime_type, file_path FROM uploaded_files WHERE message_id = ANY($1::uuid[]) AND mime_type LIKE 'image/%'",
+    [messageIds]
+  );
+  return filesRes.rows;
 }
 
 // Retrieve relevant chunks for a query from files uploaded in a chat session

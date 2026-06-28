@@ -87,7 +87,7 @@ export class TranslationAgent extends BaseAgent {
             { role: 'user', content: buildUserMessage(targetLanguage, text) }
           ],
           stream: false,
-          options: { temperature: 0.1 }
+          options: { temperature: 0.1, num_predict: 512 }
         })
       });
 

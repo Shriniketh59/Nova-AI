@@ -21,7 +21,9 @@ const originalPool = new pg.Pool({
 export const DEFAULT_USER_ID = '00000000-0000-0000-0000-000000000000';
 
 let isFallback = false;
-const JSON_DB_PATH = path.join(__dirname, '../nova_ai_db.json');
+// Overridable so tests can point at a throwaway file instead of clobbering
+// the real dev JSON fallback database.
+const JSON_DB_PATH = process.env.JSON_DB_PATH || path.join(__dirname, '../nova_ai_db.json');
 
 function readJsonDb() {
   if (!fs.existsSync(JSON_DB_PATH)) {
@@ -38,7 +40,8 @@ function readJsonDb() {
       chats: [],
       messages: [],
       uploaded_files: [],
-      document_chunks: []
+      document_chunks: [],
+      user_memory: []
     };
     fs.writeFileSync(JSON_DB_PATH, JSON.stringify(initialDb, null, 2), 'utf8');
     return initialDb;
@@ -47,7 +50,7 @@ function readJsonDb() {
     return JSON.parse(fs.readFileSync(JSON_DB_PATH, 'utf8'));
   } catch (e) {
     console.error("Failed to read JSON DB, returning empty structure", e);
-    return { users: [], chats: [], messages: [], uploaded_files: [], document_chunks: [] };
+    return { users: [], chats: [], messages: [], uploaded_files: [], document_chunks: [], user_memory: [] };
   }
 }
 
@@ -132,16 +135,18 @@ function queryJsonDb(text, params = []) {
     return { rows, rowCount: rows.length };
   }
 
-  // 7. INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3) [RETURNING *]
+  // 7. INSERT INTO messages (chat_id, role, content[, document]) VALUES (...) [RETURNING *]
   if (sql.includes('insert into messages')) {
     const chatId = params[0];
     const role = params[1];
     const content = params[2];
+    const document = params[3] ? (typeof params[3] === 'string' ? JSON.parse(params[3]) : params[3]) : null;
     const newMessage = {
       id: crypto.randomUUID(),
       chat_id: chatId,
       role,
       content,
+      document,
       created_at: new Date().toISOString()
     };
     db.messages.push(newMessage);
@@ -194,12 +199,13 @@ function queryJsonDb(text, params = []) {
 
   // 10. INSERT INTO document_chunks
   if (sql.includes('insert into document_chunks')) {
-    const [fileId, content, embedding] = params;
+    const [fileId, content, embedding, pageNumber] = params;
     const newChunk = {
       id: crypto.randomUUID(),
       file_id: fileId,
       content,
       embedding: Array.isArray(embedding) ? embedding : JSON.parse(embedding),
+      page_number: pageNumber ?? null,
       created_at: new Date().toISOString()
     };
     db.document_chunks.push(newChunk);
@@ -237,6 +243,51 @@ function queryJsonDb(text, params = []) {
       const fileId = params[0];
       rows = rows.filter(c => c.file_id === fileId);
     }
+    return { rows, rowCount: rows.length };
+  }
+
+  // 12b. SELECT summary, summary_message_count FROM chats WHERE id = $1
+  if (sql.includes('from chats') && sql.includes('summary') && sql.startsWith('select')) {
+    const id = params[0];
+    const chat = db.chats.find(c => c.id === id);
+    return { rows: chat ? [{ summary: chat.summary || null, summary_message_count: chat.summary_message_count || 0 }] : [], rowCount: chat ? 1 : 0 };
+  }
+
+  // 12c. UPDATE chats SET summary = $1, summary_updated_at = ..., summary_message_count = $2 WHERE id = $3
+  if (sql.includes('update chats set summary')) {
+    const [summary, summaryMessageCount, id] = params;
+    const chatIndex = db.chats.findIndex(c => c.id === id);
+    if (chatIndex !== -1) {
+      db.chats[chatIndex].summary = summary;
+      db.chats[chatIndex].summary_updated_at = new Date().toISOString();
+      db.chats[chatIndex].summary_message_count = summaryMessageCount;
+      writeJsonDb(db);
+    }
+    return { rows: [], rowCount: chatIndex !== -1 ? 1 : 0 };
+  }
+
+  // 13. INSERT INTO user_memory (user_id, chat_id, type, content, embedding) VALUES (...)
+  if (sql.includes('insert into user_memory')) {
+    const [userId, chatId, type, content, embedding] = params;
+    const newMemory = {
+      id: crypto.randomUUID(),
+      user_id: userId,
+      chat_id: chatId ?? null,
+      type: type || 'fact',
+      content,
+      embedding: Array.isArray(embedding) ? embedding : JSON.parse(embedding),
+      created_at: new Date().toISOString()
+    };
+    if (!db.user_memory) db.user_memory = [];
+    db.user_memory.push(newMemory);
+    writeJsonDb(db);
+    return { rows: [newMemory], rowCount: 1 };
+  }
+
+  // 14. SELECT * FROM user_memory WHERE user_id = $1
+  if (sql.includes('select * from user_memory')) {
+    const userId = params[0];
+    const rows = (db.user_memory || []).filter(m => m.user_id === userId);
     return { rows, rowCount: rows.length };
   }
 
@@ -291,6 +342,16 @@ export async function initDb() {
         console.log('Database migrations completed successfully.');
       } else {
         console.log('Tables already exist. Skipping migrations.');
+      }
+
+      // 002/003 are additive (IF NOT EXISTS / ADD COLUMN IF NOT EXISTS), so
+      // they're safe to re-run every startup instead of needing a migration
+      // tracking table.
+      for (const file of ['002_knowledge_metadata.sql', '003_user_memory.sql', '004_conversation_summary.sql', '005_message_document.sql']) {
+        const migrationFile = path.join(__dirname, '../migrations', file);
+        if (fs.existsSync(migrationFile)) {
+          await client.query(fs.readFileSync(migrationFile, 'utf8'));
+        }
       }
 
       await client.query(`

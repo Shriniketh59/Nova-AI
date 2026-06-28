@@ -15,6 +15,7 @@ dist-ssr
 # Server runtime/secrets — never commit
 server/.env
 server/nova_ai_db.json
+server/test/.test_db.*.json
 server/uploads/
 server/rag_api/__pycache__/
 server/rag_api/rag_api.log

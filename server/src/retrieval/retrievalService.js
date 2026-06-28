@@ -1,4 +1,4 @@
-import { generateEmbedding } from '../rag.js';
+import { generateEmbedding, fetchChunksForChat } from '../rag.js';
 import { hybridSearch } from './hybridSearch.js';
 import { expandQuery } from './queryExpansion.js';
 import { rerank } from './reranker.js';
@@ -40,6 +40,17 @@ export async function retrieve(query, chatId, options = {}) {
   const key = cacheKey(query, chatId);
   const cached = getCached(key);
   if (cached) return cached;
+
+  // Most chats have no uploaded documents at all (general assistant usage).
+  // Skip the embedding call + LLM query-expansion + hybrid search entirely
+  // in that case — there's nothing to retrieve, and expansion alone costs
+  // up to 4s waiting on an LLM round-trip for zero benefit.
+  const availableChunks = await fetchChunksForChat(chatId);
+  if (availableChunks.length === 0) {
+    const result = { chunks: [], contextText: '', sources: [], confidence: { score: 0, label: 'low' } };
+    setCached(key, result);
+    return result;
+  }
 
   const [queryVector, expansions] = await Promise.all([
     generateEmbedding(query),

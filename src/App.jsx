@@ -23,12 +23,12 @@ function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route 
-          path="/login" 
-          element={<Login onLogin={login} isAuthenticated={isAuthenticated} />} 
+        <Route
+          path="/login"
+          element={<Login onLogin={login} isAuthenticated={isAuthenticated} />}
         />
-        <Route 
-          path="/" 
+        <Route
+          path="/"
           element={isAuthenticated ? <RootLayout onLogout={logout} /> : <Navigate to="/login" replace />}
         >
           <Route index element={<Chat />} />

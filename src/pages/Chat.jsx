@@ -1,5 +1,41 @@
 import { useState, useRef, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import MessageContent from '../components/MessageContent';
+import ConfidenceBadge from '../components/ConfidenceBadge';
+import SourceCard from '../components/SourceCard';
+import DocumentCard from '../components/DocumentCard';
+import ImageAnalysisPanel from '../components/ImageAnalysisPanel';
+
+// Cheap heuristic, no LLM call — keeps the fast path actually fast. Routes
+// comparisons/analysis/long multi-part questions to the deep critical-thinking
+// pipeline; greetings and short factual asks stay on the quick single-shot path.
+const COMPLEXITY_KEYWORDS = /\b(compare|comparison|vs\.?|versus|difference between|pros and cons|analyze|analyse|evaluate|recommend|which is better|explain in detail|step by step plan|trade-?offs?)\b/i;
+
+// Coding asks must never fall into the 1-3min deep pipeline even if they're
+// long/multi-sentence — mirrors server/src/services/taskRouter.js's
+// isCodingQuestion so client and server agree on routing before either
+// makes a network call. Backend has its own copy as the source of truth;
+// this is just the client-side fast/deep fork.
+const CODE_DOMAIN_RE = /\b(leetcode|dsa|data structure|hackerrank|codeforces|merge sort|quick sort|binary search|two sum|fibonacci)\b/i;
+const CODE_VERBS_RE = /\b(write|give|generate|create|implement|build|code|fix|debug|refactor|optimi[sz]e)\b/i;
+const CODE_NOUNS_RE = /\b(code|function|algorithm|script|program|snippet|class|component|endpoint|api|query|regex)\b/i;
+const CODE_LANGS_RE = /(java|python|javascript|typescript|c\+\+|c#|go|golang|rust|ruby|php|sql|html|css|kotlin|swift|react|node\.?js|express)/i;
+
+function isCodingPrompt(text) {
+  if (CODE_DOMAIN_RE.test(text)) return true;
+  return CODE_VERBS_RE.test(text) && (CODE_NOUNS_RE.test(text) || CODE_LANGS_RE.test(text));
+}
+
+function isComplexPrompt(text) {
+  const trimmed = text.trim();
+  if (isCodingPrompt(trimmed)) return false;
+  if (COMPLEXITY_KEYWORDS.test(trimmed)) return true;
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  if (wordCount > 25) return true;
+  const questionMarks = (trimmed.match(/\?/g) || []).length;
+  if (questionMarks > 1) return true;
+  return false;
+}
 
 export default function Chat() {
   const { chatId } = useParams();
@@ -128,7 +164,10 @@ export default function Chat() {
       }
     }
 
-    const userInput = input;
+    // Attachment-only sends (no typed text) used to crash with "Failed to
+    // retrieve response from server" — backend rejects an empty query string.
+    // Default to a sensible prompt instead of sending "".
+    const userInput = input.trim() || (attachment ? `Please analyze this document: ${attachment.name}` : input);
     const userAttachment = attachment;
 
     // Add user message to local state immediately
@@ -138,20 +177,28 @@ export default function Chat() {
     setAttachment(null);
 
     // Add placeholder message for AI streaming response
-    setMessages(prev => [...prev, { role: 'ai', content: '', isStreaming: true, isThinking: true }]);
+    setMessages(prev => [...prev, { role: 'ai', content: '', isStreaming: true, isThinking: true, stageLabel: 'Thinking...' }]);
 
+    // Two-tier routing: cheap client-side heuristic (no LLM call, stays free
+    // for the fast path) decides whether this prompt needs the full
+    // plan->research->reason->review pipeline (1-3min) or the old single-shot
+    // endpoint. Comparisons/analysis/long multi-part questions go deep;
+    // greetings and short factual asks stay fast. Fast-path budget matches
+    // the server's OLLAMA_TIMEOUT_MS (180s) — rag_api can now auto-continue
+    // generation across several Ollama round-trips to avoid truncating
+    // long/code answers, so the old 65s client timeout fired on healthy responses.
+    const useDeepPipeline = isComplexPrompt(userInput);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 65000);
+    const timeoutId = setTimeout(() => controller.abort(), useDeepPipeline ? 240000 : 185000);
 
     try {
-      // 2. Fetch the streaming response from backend
-      const response = await fetch(`/api/chats/${activeId}/query`, {
+      // 2. Fetch the streaming response — deep pipeline or fast single-shot
+      const response = await fetch(useDeepPipeline ? '/api/agent/chat' : `/api/chats/${activeId}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: userInput,
-          fileId: userAttachment?.id || null
-        }),
+        body: JSON.stringify(useDeepPipeline
+          ? { chatId: activeId, message: userInput }
+          : { query: userInput, fileId: userAttachment?.id || null }),
         signal: controller.signal
       });
 
@@ -170,23 +217,39 @@ export default function Chat() {
 
         const chunk = decoder.decode(value, { stream: true });
         const lines = chunk.split('\n\n');
-        
+
         for (const line of lines) {
           if (line.startsWith('data: ')) {
             const dataStr = line.slice(6).trim();
             if (dataStr === '[DONE]') {
               break;
             }
+            let data;
             try {
-              const data = JSON.parse(dataStr);
-              if (data.error) {
-                throw new Error(data.error);
+              data = JSON.parse(dataStr);
+            } catch {
+              // Ignore partial chunk JSON parsing errors
+              continue;
+            }
+            if (data.error) {
+              throw new Error(data.error);
+            }
+            {
+              // Stage-progress events ({stage, stageLabel}) arrive while the
+              // pipeline is still working — update the "Thinking..." label
+              // instead of leaving it static for minutes. The final event
+              // carries the complete answer (no incremental tokens — the
+              // answer doesn't exist until reasoning+review finish).
+              if (data.stage) {
+                setMessages(prev => {
+                  const updated = [...prev];
+                  if (updated[updated.length - 1]) {
+                    updated[updated.length - 1] = { ...updated[updated.length - 1], stageLabel: data.stageLabel };
+                  }
+                  return updated;
+                });
+                continue;
               }
-              // Backend now sends the full accumulated text each chunk (not a delta),
-              // so the UI just mirrors it directly instead of appending.
-              // The sources-only event arrives with text:'' before any token —
-              // keep "Thinking..." showing until real text exists, otherwise
-              // the bubble flashes blank (sources with no content).
               if (data.text) accumulatedText = data.text;
               setMessages(prev => {
                 const updated = [...prev];
@@ -197,13 +260,13 @@ export default function Chat() {
                     isStreaming: true,
                     isThinking: !accumulatedText,
                     sources: data.sources && data.sources.length > 0 ? data.sources : updated[updated.length - 1].sources,
-                    confidence: data.confidence || updated[updated.length - 1].confidence
+                    confidence: data.confidence || updated[updated.length - 1].confidence,
+                    contradictions: data.contradictions || updated[updated.length - 1].contradictions,
+                    document: data.document || updated[updated.length - 1].document
                   };
                 }
                 return updated;
               });
-            } catch {
-              // Ignore partial chunk JSON parsing errors
             }
           }
         }
@@ -347,48 +410,33 @@ export default function Chat() {
                     <div className="flex items-center gap-2 py-1">
                       <img src="/logo.png" alt="" className="w-6 h-6 object-contain animate-nova-thinking" />
                       <span className="text-sm text-zinc-400 animate-pulse">
-                        {msg.sources && msg.sources.length > 0 ? 'Searching the web...' : 'Thinking...'}
+                        {msg.stageLabel || 'Thinking...'}
                       </span>
                     </div>
                   ) : (
                     <>
-                      {msg.content && <p className="whitespace-pre-wrap text-[15px] leading-relaxed">{msg.content}</p>}
+                      {msg.document ? (
+                        <DocumentCard {...msg.document} />
+                      ) : msg.imageAnalysis ? (
+                        <ImageAnalysisPanel {...msg.imageAnalysis} confidence={msg.confidence} />
+                      ) : (
+                        msg.content && <MessageContent content={msg.content} />
+                      )}
                       {msg.sources && msg.sources.length > 0 && (
                         <div className="mt-3 pt-3 border-t border-white/10">
                           <div className="flex items-center justify-between mb-2">
                             <p className="text-xs font-medium text-zinc-500">Sources</p>
-                            {msg.confidence && (
-                              <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
-                                msg.confidence.label === 'high' ? 'bg-emerald-500/15 text-emerald-400' :
-                                msg.confidence.label === 'medium' ? 'bg-amber-500/15 text-amber-400' :
-                                'bg-red-500/15 text-red-400'
-                              }`}>
-                                {msg.confidence.score}% confidence
-                              </span>
-                            )}
+                            {/* Confidence now comes from the Review stage's LLM critique of the
+                                final answer against all gathered evidence, not just doc-match score. */}
+                            <ConfidenceBadge confidence={msg.confidence} />
                           </div>
+                          {msg.contradictions && msg.contradictions.length > 0 && (
+                            <p className="text-[11px] text-amber-400/90 mb-2">
+                              ⚠ Sources disagree: {msg.contradictions.map(c => `${c.sourceA} vs ${c.sourceB}`).join(', ')}
+                            </p>
+                          )}
                           <div className="flex flex-wrap gap-2">
-                            {msg.sources.map((s, i) => {
-                              const isWeb = s.type === 'web';
-                              const card = (
-                                <div className="flex items-start gap-2 px-3 py-2 bg-white/5 border border-white/10 rounded-lg max-w-[220px] hover:bg-white/10 transition-colors">
-                                  <span className="text-[10px] mt-0.5 px-1.5 py-0.5 rounded bg-white/10 text-zinc-400 font-mono">
-                                    {isWeb ? '🌐' : '📄'}
-                                  </span>
-                                  <div className="overflow-hidden">
-                                    <p className="text-xs text-zinc-200 truncate font-medium">{s.title || s.filename}</p>
-                                    {s.confidence != null && (
-                                      <p className="text-[10px] text-zinc-500">match {Math.round(s.confidence * 100)}%</p>
-                                    )}
-                                  </div>
-                                </div>
-                              );
-                              return isWeb && s.url ? (
-                                <a key={i} href={s.url} target="_blank" rel="noopener noreferrer">{card}</a>
-                              ) : (
-                                <div key={i}>{card}</div>
-                              );
-                            })}
+                            {msg.sources.map((s, i) => <SourceCard key={i} source={s} />)}
                           </div>
                         </div>
                       )}

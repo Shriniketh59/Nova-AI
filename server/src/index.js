@@ -6,14 +6,35 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import pool, { initDb, DEFAULT_USER_ID } from './db.js';
-import { parseDocument, chunkText, generateEmbedding, searchRelevantChunks } from './rag.js';
+import { parseDocument, chunkWithPages, generateEmbedding, searchRelevantChunks, fetchChunksForChat, fetchImagesForChat } from './rag.js';
 import { runRagQuery } from './services/ragService.js';
 import { retrieve } from './retrieval/retrievalService.js';
+import { computeAnswerConfidence } from './retrieval/confidenceEngine.js';
+import { tierFor } from './retrieval/complexity.js';
+import { calculateAtsScore, formatAtsAnswer } from './services/atsService.js';
+import { classifyTask } from './services/taskRouter.js';
+import { DocumentAnalysisAgent } from './agents/documentAnalysisAgent.js';
+import { DocumentComparisonAgent } from './agents/documentComparisonAgent.js';
+import { ResumeAnalysisAgent } from './agents/resumeAnalysisAgent.js';
+import { VisionAgent } from './agents/visionAgent.js';
+import { CodeAgent } from './agents/codeAgent.js';
+
+const documentAnalysisAgent = new DocumentAnalysisAgent();
+const documentComparisonAgent = new DocumentComparisonAgent();
+const resumeAnalysisAgent = new ResumeAnalysisAgent();
+const visionAgent = new VisionAgent();
+const codeAgent = new CodeAgent();
 import { ReviewAgent } from './agents/reviewAgent.js';
 import { memoryAgent } from './agents/memoryAgent.js';
 import logger from './utils/logger.js';
 import agentChatRouter from './routes/agentChat.js';
+import ideAgentRouter from './routes/ideAgent.js';
+import fsRouter from './routes/fsRoute.js';
+import novaRouter from './routes/novaRoute.js';
 import { TranslationAgent, SUPPORTED_LANGUAGES } from './agents/translationAgent.js';
+import { ensureAllCollections, upsertPoints, COLLECTIONS } from './retrieval/qdrantClient.js';
+import { getConversationContext } from './utils/contextManager.js';
+import { detectDocumentRequest, buildSummary } from './services/documentTypeDetector.js';
 
 const reviewAgent = new ReviewAgent();
 
@@ -50,6 +71,17 @@ const PORT = process.env.PORT || 5001;
 
 app.use(cors());
 app.use(express.json());
+
+// Request-timing observability: one log line per request with route,
+// latency, and status — cheap (no extra deps), enough to spot slow routes
+// or error spikes from server/logs/app.log without instrumenting each route.
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    logger.info('request', { method: req.method, route: req.path, status: res.statusCode, latencyMs: Date.now() - start });
+  });
+  next();
+});
 
 // Serve static files from Vite build directory
 const distPath = path.join(__dirname, '../../dist');
@@ -228,7 +260,11 @@ app.post('/api/chats/:chatId/query', async (req, res) => {
   }
 
   const reqId = `${chatId}-${Date.now()}`;
-  const OLLAMA_TIMEOUT_MS = 60000;
+  // rag_api now auto-continues generation (up to MAX_CONTINUATIONS extra
+  // Ollama round-trips) when a response would otherwise truncate at the
+  // token cap — worst case is several sequential CPU generations, so the
+  // old 60s budget aborted healthy-but-long completions. 180s covers it.
+  const OLLAMA_TIMEOUT_MS = 180000;
   const controller = new AbortController();
   let timedOut = false;
   const timeoutHandle = setTimeout(() => {
@@ -236,6 +272,7 @@ app.post('/api/chats/:chatId/query', async (req, res) => {
     controller.abort();
   }, OLLAMA_TIMEOUT_MS);
 
+  console.log(`[REQUEST_RECEIVED] ${reqId} query="${query.slice(0, 80)}"`);
   console.log(`[CHAT_START] ${reqId} query="${query.slice(0, 80)}"`);
 
   try {
@@ -245,6 +282,7 @@ app.post('/api/chats/:chatId/query', async (req, res) => {
       [chatId, 'user', query]
     );
     const userMsg = userMsgResult.rows[0];
+    memoryAgent.extractMemory(DEFAULT_USER_ID, chatId, query).catch(() => {});
 
     // If fileId is provided, associate the file with this user message
     if (fileId) {
@@ -254,22 +292,159 @@ app.post('/api/chats/:chatId/query', async (req, res) => {
       );
     }
 
-    // 2. Fetch context: hybrid+expanded+reranked document retrieval, plus
-    // lightweight keyword-overlap memory of earlier turns in this chat.
-    // Priority order — Retrieved Sources > Memory > Model Knowledge — is
-    // enforced by ordering the context blocks and by gating web_search off
-    // when document retrieval already has high confidence (don't dilute a
-    // well-grounded answer with open-web noise).
-    console.log(`[RETRIEVAL_START] ${reqId}`);
-    const [retrieval, memories] = await Promise.all([
-      retrieve(query, chatId, { topK: 8 }),
-      memoryAgent.getRelevantMemories(chatId, query, userMsg.id, 3)
+    // 2. Task Router — runs BEFORE retrieval/web search. Priority order:
+    // Uploaded Document > RAG Sources > Memory > Web Search. If this chat
+    // has an attached file and the query is a document task (review/ats/
+    // analyze), the file content is the only allowed source — never let
+    // the general web-search path run instead (was the root cause of "Review
+    // my resume" returning resume-builder website analysis).
+    const [allChatChunks, chatImages] = await Promise.all([
+      fetchChunksForChat(chatId),
+      fetchImagesForChat(chatId)
     ]);
+    const hasFiles = allChatChunks.length > 0;
+    const hasImages = chatImages.length > 0;
+    const fileCount = new Set(allChatChunks.map(c => c.file_id)).size;
+    const task = classifyTask(query, { hasFiles, hasImages, fileCount });
+    console.log(`[TASK_ROUTE] ${reqId} type=${task.type} hasFiles=${hasFiles} hasImages=${hasImages}`);
+    console.log(`[ROUTER_SELECTED] ${reqId} route=${task.type}`);
+
+    if (task.type === 'vision') {
+      const image = chatImages[chatImages.length - 1];
+      const result = await visionAgent.run(query, { filePath: image.file_path, fileName: image.original_filename });
+      const answer = result.output.answer;
+      const confidence = { score: result.success ? 75 : 0, label: result.success ? 'high' : 'low', reason: 'Based on uploaded image content only.' };
+
+      await pool.query('INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)', [chatId, 'ai', answer]);
+      await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.flushHeaders();
+      res.write(`data: ${JSON.stringify({ text: answer, sources: [{ filename: image.original_filename, type: 'image' }], confidence })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      clearTimeout(timeoutHandle);
+      return res.end();
+    }
+
+    if (task.type === 'coding') {
+      // Code fast path: Question -> Code Agent -> Quick Validation -> Response.
+      // Skips Research Agent, web search, multi-source retrieval, and the
+      // long planner/review pipeline entirely — none of those help "write a
+      // mergesort in Python", they only add latency. Streams tokens to the
+      // client immediately instead of waiting for the full completion.
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.flushHeaders();
+
+      console.log(`[OLLAMA_START] ${reqId}`);
+      let codeAnswer = '';
+      try {
+        const { answer, validation, confidence } = await codeAgent.runStream(query, (token) => {
+          codeAnswer += token;
+          res.write(`data: ${JSON.stringify({ text: codeAnswer, sources: [] })}\n\n`);
+        });
+        console.log(`[OLLAMA_COMPLETE] ${reqId} len=${answer.length}`);
+        console.log(`[REVIEW_START] ${reqId}`);
+        codeAnswer = answer;
+        console.log(`[REVIEW_COMPLETE] ${reqId} pass=${validation.pass} confidence=${confidence.score}`);
+
+        await pool.query('INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)', [chatId, 'ai', codeAnswer]);
+        await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+
+        res.write(`data: ${JSON.stringify({ text: codeAnswer, sources: [], confidence })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        console.log(`[RESPONSE_SENT] ${reqId}`);
+      } catch (err) {
+        logger.error('codeAgent.failed', { chatId, error: err.message });
+        res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+        res.write('data: [DONE]\n\n');
+      }
+      clearTimeout(timeoutHandle);
+      return res.end();
+    }
+
+    if (task.type !== 'general') {
+      const documentText = allChatChunks.map(c => c.content).join('\n');
+      const fileName = allChatChunks[0]?.original_filename || 'document';
+      let answer, confidence;
+
+      if (task.type === 'document_comparison') {
+        const byFile = new Map();
+        for (const chunk of allChatChunks) {
+          const existing = byFile.get(chunk.file_id) || { fileName: chunk.original_filename, text: '' };
+          existing.text += `${chunk.content}\n`;
+          byFile.set(chunk.file_id, existing);
+        }
+        const documents = [...byFile.values()];
+        const result = await documentComparisonAgent.run(query, { documents });
+        answer = result.output.answer;
+        confidence = { score: result.success ? 75 : 0, label: result.success ? 'high' : 'low', reason: 'Based on the uploaded documents only.' };
+        const sourceCards = documents.map(d => ({ filename: d.fileName, type: 'document' }));
+
+        await pool.query('INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)', [chatId, 'ai', answer]);
+        await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.flushHeaders();
+        res.write(`data: ${JSON.stringify({ text: answer, sources: sourceCards, confidence })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        clearTimeout(timeoutHandle);
+        return res.end();
+      }
+
+      if (task.type === 'ats') {
+        const atsResult = calculateAtsScore(documentText);
+        answer = formatAtsAnswer(atsResult);
+        confidence = { score: atsResult.score, label: atsResult.score >= 70 ? 'high' : atsResult.score >= 30 ? 'medium' : 'low', reason: 'Calculated from parsed resume content.' };
+      } else if (task.type === 'resume_analysis') {
+        const result = await resumeAnalysisAgent.run(query, { documentText, fileName });
+        answer = result.output.answer;
+        confidence = { score: result.success ? 75 : 0, label: result.success ? 'high' : 'low', reason: 'Based on uploaded resume content only.' };
+      } else {
+        const result = await documentAnalysisAgent.run(query, { documentText, fileName });
+        answer = result.output.answer;
+        confidence = { score: result.success ? 75 : 0, label: result.success ? 'high' : 'low', reason: 'Based on uploaded document content only.' };
+      }
+
+      await pool.query('INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)', [chatId, 'ai', answer]);
+      await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.flushHeaders();
+      res.write(`data: ${JSON.stringify({ text: answer, sources: [{ filename: fileName, type: 'document' }], confidence })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      clearTimeout(timeoutHandle);
+      return res.end();
+    }
+
+    // 3. General path: hybrid+expanded+reranked document retrieval, plus
+    // lightweight keyword-overlap memory of earlier turns in this chat.
+    console.log(`[RETRIEVAL_START] ${reqId}`);
+    console.log(`[RAG_START] ${reqId}`);
+    const tier = tierFor(query);
+    const [retrieval, memories, conversationContext] = await Promise.all([
+      retrieve(query, chatId, { topK: tier.topK }),
+      memoryAgent.getRelevantMemories(chatId, query, userMsg.id, 3),
+      getConversationContext(chatId)
+    ]);
+    console.log(`[RAG_COMPLETE] ${reqId} chunks=${retrieval.chunks.length}`);
+    console.log(`[MEMORY_RETRIEVED] ${reqId} count=${memories.length}`);
+
     const contextBlocks = [];
     if (retrieval.contextText) contextBlocks.push(`[Document context]\n${retrieval.contextText}`);
-    if (memories.length > 0) contextBlocks.push(`[Earlier in this conversation]\n${memories.join('\n---\n')}`);
+    if (memories.length > 0) contextBlocks.push(`[Relevant earlier facts]\n${memories.join('\n---\n')}`);
+    if (conversationContext) contextBlocks.push(conversationContext);
     const contextText = contextBlocks.join('\n\n');
-    const useWebSearch = retrieval.confidence.label !== 'high';
+    // Priority order: Uploaded Document > Web Search — a doc attached to
+    // this chat means web search never runs here, even if retrieval
+    // confidence on this particular query is low. Otherwise, never settle
+    // for a single source: low confidence OR too few doc chunks both pull
+    // in web evidence to backfill toward this query's complexity tier.
+    const useWebSearch = !hasFiles && (retrieval.confidence.label !== 'high' || retrieval.chunks.length < tier.minSources);
     console.log(`[RETRIEVAL_END] ${reqId} chunks=${retrieval.chunks.length} confidence=${retrieval.confidence.label} memories=${memories.length}`);
 
     // 3. Initialize SSE headers
@@ -293,6 +468,7 @@ app.post('/api/chats/:chatId/query', async (req, res) => {
       throw new Error(`RAG API error: ${ragRes.status}`);
     }
     console.log(`[OLLAMA_END] ${reqId} status=${ragRes.status}`);
+    console.log(`[OLLAMA_COMPLETE] ${reqId} status=${ragRes.status}`);
 
     let accumulatedText = '';
     let sources = [];
@@ -332,14 +508,39 @@ app.post('/api/chats/:chatId/query', async (req, res) => {
     // web sources into one source-card list for the frontend, and surface
     // the retrieval confidence so the UI can show "low confidence" instead
     // of presenting every answer with equal certainty.
+    console.log(`[REVIEW_START] ${reqId}`);
     const webSourceCards = sources.map(s => ({ ...s, type: 'web' }));
     const allSourceCards = [...retrieval.sources, ...webSourceCards];
-    res.write(`data: ${JSON.stringify({ text: accumulatedText, sources: allSourceCards, confidence: retrieval.confidence })}\n\n`);
+    // Answer confidence is computed separately from retrieval/match score —
+    // never show vector similarity directly as confidence.
+    const answerConfidence = computeAnswerConfidence({
+      sourceCount: allSourceCards.length,
+      contradictions: [],
+      docConfidence: retrieval.confidence,
+      hasWebSources: webSourceCards.length > 0
+    });
+    console.log(`[REVIEW_COMPLETE] ${reqId} confidence=${answerConfidence.label}`);
+
+    // Auto-attach a document card when the user asked for a standalone
+    // document (implementation plan, resume, SRS, ...) — content is exactly
+    // the answer already generated above, never a second LLM call.
+    const docType = detectDocumentRequest(query);
+    const document = docType ? {
+      title: docType.label,
+      subtitle: null,
+      type: docType.type,
+      summary: buildSummary(accumulatedText),
+      content: accumulatedText,
+      createdAt: new Date().toISOString(),
+      exportFormats: ['docx', 'pdf', 'pptx', 'xlsx', 'markdown', 'txt']
+    } : null;
+
+    res.write(`data: ${JSON.stringify({ text: accumulatedText, sources: allSourceCards, confidence: answerConfidence, document })}\n\n`);
 
     // 5. Save final AI response to database
     await pool.query(
-      'INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)',
-      [chatId, 'ai', accumulatedText]
+      'INSERT INTO messages (chat_id, role, content, document) VALUES ($1, $2, $3, $4)',
+      [chatId, 'ai', accumulatedText, document ? JSON.stringify(document) : null]
     );
 
     // Update chat timestamp
@@ -368,6 +569,9 @@ app.post('/api/chats/:chatId/query', async (req, res) => {
 
 // Multi-agent entry point (currently routes through SupervisorAgent -> KnowledgeAgent).
 app.use('/api/agent/chat', agentChatRouter);
+app.use('/api/ide/agent', ideAgentRouter);
+app.use('/api/fs', fsRouter);
+app.use('/api/nova', novaRouter);
 
 // Multilingual translation endpoint, isolated from the chat/RAG flow per
 // the "translation only, never answer/explain/summarize" system prompt.
@@ -472,18 +676,31 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
     // 2. Parse and chunk the document for RAG indexing
     console.log(`Parsing document ${originalname} (${mimetype})...`);
-    const docText = await parseDocument(filePath, mimetype);
-    const chunks = chunkText(docText);
+    const parsed = await parseDocument(filePath, mimetype);
+    const chunks = chunkWithPages(parsed);
 
     console.log(`Generating embeddings for ${chunks.length} chunks...`);
-    // 3. Generate embeddings and save chunks
-    for (const chunk of chunks) {
-      if (!chunk.trim()) continue;
-      const embedding = await generateEmbedding(chunk);
-      await pool.query(
-        'INSERT INTO document_chunks (file_id, content, embedding) VALUES ($1, $2, $3)',
-        [fileRecord.id, chunk, JSON.stringify(embedding)]
+    // 3. Generate embeddings and save chunks, stamped with page_number for
+    // real source-grounding citations (filename + page, not just filename).
+    for (const { content, page_number } of chunks) {
+      if (!content.trim()) continue;
+      const embedding = await generateEmbedding(content);
+      const chunkResult = await pool.query(
+        'INSERT INTO document_chunks (file_id, content, embedding, page_number) VALUES ($1, $2, $3, $4) RETURNING id',
+        [fileRecord.id, content, JSON.stringify(embedding), page_number]
       );
+      if (process.env.QDRANT_URL) {
+        const chunkId = chunkResult.rows[0]?.id;
+        try {
+          await upsertPoints(COLLECTIONS.documents.name, [{
+            id: chunkId,
+            vector: embedding,
+            payload: { file_id: fileRecord.id, content, page_number, original_filename: originalname }
+          }]);
+        } catch (err) {
+          console.warn(`⚠️ Qdrant upsert failed for chunk ${chunkId}, doc still searchable via fallback:`, err.message);
+        }
+      }
     }
 
     console.log(`Successfully indexed ${originalname} with ${chunks.length} chunks.`);
@@ -560,8 +777,23 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(distPath, 'index.html'));
 });
 
-// Initialize DB and start listening
-initDb().then(() => {
+export default app;
+
+// Initialize DB and start listening — skipped when imported by tests
+// (NODE_ENV=test), which boot their own isolated app instance via supertest
+// without a real listener or live Ollama/Qdrant/Postgres.
+if (process.env.NODE_ENV !== 'test') {
+initDb().then(async () => {
+  // Optional — only attempted when QDRANT_URL is set, so local dev without
+  // a Qdrant container keeps using the existing in-JS cosine search.
+  if (process.env.QDRANT_URL) {
+    try {
+      await ensureAllCollections();
+      console.log('Qdrant collections ready.');
+    } catch (err) {
+      console.warn('⚠️ Qdrant unreachable, falling back to in-JS search:', err.message);
+    }
+  }
   app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
   });
@@ -569,3 +801,4 @@ initDb().then(() => {
   console.error('Failed to start server:', err);
   process.exit(1);
 });
+}
