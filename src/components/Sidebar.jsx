@@ -96,6 +96,16 @@ export default function Sidebar({ onLogout }) {
       {/* Bottom area: User & Settings */}
       <div className="p-3 flex flex-col space-y-1 mt-auto">
         <NavLink
+          to="/coach"
+          className="flex items-center space-x-3 w-full hover:bg-white/5 text-zinc-300 px-3 py-2.5 rounded-lg text-sm transition-colors"
+        >
+          <svg className="w-4 h-4 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L4.5 12l5.25-5m4.5 0L19.5 12l-5.25 5" />
+          </svg>
+          <span>Interview Coach</span>
+        </NavLink>
+
+        <NavLink
           to="/settings"
           className="flex items-center space-x-3 w-full hover:bg-white/5 text-zinc-300 px-3 py-2.5 rounded-lg text-sm transition-colors"
         >

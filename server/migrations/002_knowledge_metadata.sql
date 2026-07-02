@@ -13,7 +13,7 @@ ALTER TABLE uploaded_files
 -- installs had no table for it (silently falling back to the JSON store
 -- on every chunk insert). Create it here so the ALTERs below have a target.
 CREATE TABLE IF NOT EXISTS document_chunks (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   file_id UUID NOT NULL REFERENCES uploaded_files(id) ON DELETE CASCADE,
   content TEXT NOT NULL,
   embedding JSONB NOT NULL,

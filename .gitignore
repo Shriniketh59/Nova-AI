@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv312/
+.pytest_cache/
+
 # Server runtime/secrets — never commit
 server/.env
 server/nova_ai_db.json

@@ -4,6 +4,7 @@ import RootLayout from './layouts/RootLayout';
 import Chat from './pages/Chat';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
+import Coach from './pages/Coach';
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
@@ -34,6 +35,7 @@ function App() {
           <Route index element={<Chat />} />
           <Route path="chat/:chatId" element={<Chat />} />
           <Route path="settings" element={<Settings />} />
+          <Route path="coach" element={<Coach />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

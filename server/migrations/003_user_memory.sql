@@ -3,7 +3,7 @@
 -- global/user-level memory (preferences); chat_id set scopes it to one
 -- project/chat thread.
 CREATE TABLE IF NOT EXISTS user_memory (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   chat_id UUID REFERENCES chats(id) ON DELETE CASCADE,
   type TEXT NOT NULL DEFAULT 'fact', -- preference|project|fact
