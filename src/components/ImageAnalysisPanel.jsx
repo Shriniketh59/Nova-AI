@@ -1,6 +1,4 @@
-import ConfidenceBadge from './ConfidenceBadge';
-
-export default function ImageAnalysisPanel({ imageUrl, extractedText, analysis, findings, confidence }) {
+export default function ImageAnalysisPanel({ imageUrl, extractedText, analysis, findings }) {
   return (
     <div className="my-3 rounded-2xl border border-white/10 bg-white/[0.03] shadow-md overflow-hidden max-w-xl">
       {imageUrl && (
@@ -19,7 +17,6 @@ export default function ImageAnalysisPanel({ imageUrl, extractedText, analysis, 
           <div className="px-4 py-3">
             <div className="flex items-center justify-between mb-1.5">
               <p className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Analysis</p>
-              <ConfidenceBadge confidence={confidence} />
             </div>
             <p className="text-[13px] text-zinc-300 leading-relaxed">{analysis}</p>
           </div>

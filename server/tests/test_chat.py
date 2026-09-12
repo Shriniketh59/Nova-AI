@@ -1,6 +1,6 @@
 import pytest
 
-from .conftest import requires_db
+from conftest import requires_db
 
 
 @requires_db

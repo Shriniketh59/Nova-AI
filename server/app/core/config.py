@@ -1,7 +1,12 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
+_ENV_PATH = os.path.join(_ROOT_DIR, ".env")
+if os.path.exists(_ENV_PATH):
+    load_dotenv(_ENV_PATH, override=True)
+else:
+    load_dotenv(override=True)
 
 
 def _int(name, default):
@@ -16,17 +21,18 @@ DB_NAME = "nova_ai"
 PORT = _int("PORT", 5001)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY")
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
-OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "all-minilm")
-OLLAMA_CODE_MODEL = os.environ.get("OLLAMA_CODE_MODEL") or OLLAMA_MODEL
+OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "all-minilm:latest")
+OLLAMA_CODE_MODEL = os.environ.get("OLLAMA_CODE_MODEL", "qwen2.5-coder:1.5b")
 
 CODE_LLM_REVIEW = os.environ.get("CODE_LLM_REVIEW", "false").lower() == "true"
 CODE_NUM_PREDICT = _int("CODE_NUM_PREDICT", 2048)
 MAX_CONTINUATIONS = _int("MAX_CONTINUATIONS", 3)
 
-RAG_API_URL = os.environ.get("RAG_API_URL", "http://127.0.0.1:8008")
+RAG_API_URL = os.environ.get("RAG_API_URL", f"http://127.0.0.1:{PORT}")
 RAG_TOP_K = _int("RAG_TOP_K", 8)
 RAG_SIMILARITY_THRESHOLD = float(os.environ.get("RAG_SIMILARITY_THRESHOLD", 0.25))
 RAG_MAX_CONTEXT_CHARS = _int("RAG_MAX_CONTEXT_CHARS", 6000)

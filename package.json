@@ -4,6 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "start": "python3 app.py",
+    "server": "python3 app.py",
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",

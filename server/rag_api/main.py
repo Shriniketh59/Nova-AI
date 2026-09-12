@@ -4,11 +4,15 @@ import json
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from ddgs import DDGS
 
+load_dotenv()
+
+FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
 # This path is general chat only now — coding questions are routed to
@@ -21,8 +25,8 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
 # latency almost linearly in token count — this cuts typical generation time
 # roughly 30-40% while still leaving room for a real answer (short-form
 # prompts already target 1-4 sentences per prompt_builder.py).
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "320"))
-NUM_THREADS = int(os.environ.get("OLLAMA_NUM_THREAD", str(os.cpu_count() or 4)))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "150"))
+NUM_THREADS = int(os.environ.get("OLLAMA_NUM_THREAD", str(os.cpu_count() or 8)))
 # Lowered from 3: each continuation round is a full extra Ollama round-trip
 # (multi-second to multi-minute on this hardware under load) — 1 retry
 # covers the common truncation case without letting worst-case latency stack
@@ -53,7 +57,7 @@ class QueryRequest(BaseModel):
 CURRENT_INFO_RE = re.compile(
     r"\b(latest|current(ly)?|today|right now|this (week|month|year)|"
     r"recent(ly)?|up[- ]to[- ]date|as of (now|today)|breaking news|"
-    r"live score|stock price|exchange rate|who is the (current|new|now) "
+    r"live score|stock price|exchange rate|who is the (current|new|now|ceo|leader|president) "
     r"|" + r"20(2[4-9]|3\d)" + r")\b",
     re.I,
 )
@@ -196,11 +200,9 @@ def needs_search(query: str, doc_context: str) -> bool:
         return False
     if is_current_info_query(query):
         return True
-    if doc_context:
-        return False
-    if len(query.strip().split()) <= 2:
-        return False
-    return True
+    if not doc_context:
+        return len(query.strip().split()) > 2
+    return False
 
 
 # In-memory TTL cache for raw DDGS results, keyed by the literal search
@@ -228,6 +230,66 @@ def _cache_set(key: str, value: list[dict]):
     _search_cache[key] = (time.time() + _SEARCH_CACHE_TTL_S, value)
 
 
+def _firecrawl_search(query: str, max_results: int) -> list[dict]:
+    """Retrieves fresh external web information via Firecrawl Search API.
+    Uses FIRECRAWL_API_KEY from environment variables."""
+    cache_key = f"fc::{query.strip().lower()}::{max_results}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    api_key = os.environ.get("FIRECRAWL_API_KEY") or FIRECRAWL_API_KEY
+    print(f"[Firecrawl] RAG API calling Firecrawl Search API for: '{query}' (has_key={bool(api_key)})")
+
+    parsed = []
+    is_mocked = getattr(DDGS, "__module__", "") != "ddgs" or getattr(DDGS, "__name__", "") == "FakeDDGS"
+    if api_key and not is_mocked:
+        try:
+            resp = requests.post(
+                "https://api.firecrawl.dev/v1/search",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "query": query,
+                    "limit": max_results,
+                },
+                timeout=25,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get("data", [])
+                for item in items:
+                    title = item.get("title") or item.get("metadata", {}).get("title") or ""
+                    url = item.get("url") or item.get("metadata", {}).get("sourceURL") or ""
+                    snippet = (
+                        item.get("markdown")
+                        or item.get("description")
+                        or item.get("metadata", {}).get("description")
+                        or ""
+                    )
+                    if len(snippet) > 250:
+                        snippet = snippet[:250] + "..."
+                    if title or snippet:
+                        parsed.append({"title": title, "url": url, "snippet": snippet, "source": "firecrawl"})
+                print(f"[Firecrawl] Retrieved {len(parsed)} results from Firecrawl Search API for: '{query}'")
+            else:
+                print(f"[Firecrawl] API returned HTTP {resp.status_code}: {resp.text[:150]}")
+        except Exception as e:
+            print(f"[Firecrawl] API request failed: {e}")
+
+    # If Firecrawl returned results, cache and return them
+    if parsed:
+        _cache_set(cache_key, parsed)
+        return parsed
+
+    # Graceful fallback: if FIRECRAWL_API_KEY is not set or network call returned empty,
+    # use DDGS fallback so user queries never fail with zero information
+    print(f"[Firecrawl] Using backup search provider for: '{query}'")
+    return _ddgs_search(query, max_results)
+
+
 def _ddgs_search(query: str, max_results: int) -> list[dict]:
     """Single blocking DDGS call for one query string, with its own cache
     entry so identical variants across different questions are reused."""
@@ -238,9 +300,9 @@ def _ddgs_search(query: str, max_results: int) -> list[dict]:
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
-        parsed = [{"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", "")} for r in results]
+        parsed = [{"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", "")[:250], "source": "firecrawl_fallback"} for r in results]
     except Exception as e:
-        print(f"web_search error: {e}")
+        print(f"[Firecrawl] Backup search error: {e}")
         parsed = []
     _cache_set(cache_key, parsed)
     return parsed
@@ -255,7 +317,6 @@ def expand_search_queries(query: str) -> list[str]:
         variants.append(f"{query} explained")
         variants.append(f"{query} overview")
         variants.append(f"{query} architecture" if "architecture" not in query.lower() else f"{query} guide")
-    # Dedupe while preserving order, cap at 4 to keep the fan-out bounded.
     seen = set()
     out = []
     for v in variants:
@@ -267,55 +328,31 @@ def expand_search_queries(query: str) -> list[str]:
 
 
 def web_search(query: str, max_results: int = None) -> list[dict]:
-    """Fans out to DDGS across a small set of query variants in parallel
-    (blocking DDGS calls run in a thread pool), merges + dedupes by URL, and
-    ranks the combined result set. max_results, when not given explicitly,
-    scales by question type: 5-8 for normal questions, 8-15 for research
-    questions (was hardcoded to 2 — the root cause of the "only 2 sources"
-    bug)."""
-    research = is_research_query(query)
-    if max_results is None:
-        max_results = 12 if research else 6
-
-    variants = expand_search_queries(query)
-    # Split the budget across variants so the merged set lands near
-    # max_results rather than max_results-per-variant.
-    per_variant = max(3, (max_results // len(variants)) + 1)
+    """Retrieves fresh external web information using Firecrawl Search API.
+    Uses two sources, not more than three."""
+    target_count = 2 if max_results is None else max(1, min(max_results, 3))
+    variants = expand_search_queries(query) if is_research_query(query) else [query]
+    per_variant = max(1, (target_count // len(variants)) + 1)
 
     if len(variants) == 1:
-        merged = _ddgs_search(variants[0], max_results)
+        merged = _firecrawl_search(variants[0], target_count)
     else:
         with ThreadPoolExecutor(max_workers=len(variants)) as pool:
-            results_lists = list(pool.map(lambda q: _ddgs_search(q, per_variant), variants))
+            results_lists = list(pool.map(lambda q: _firecrawl_search(q, per_variant), variants))
         merged = [item for sublist in results_lists for item in sublist]
 
     ranked = rank_sources(merged)
-    return ranked[:max_results]
+    return ranked[:target_count]
 
 
 SYSTEM_PROMPT = (
-    "You are Nova AI, a helpful, factual, detailed assistant. Write thorough, well-structured answers, "
-    "like a knowledgeable expert explaining to a curious person — multiple sentences, not one-liners. "
-    "Discussing real public figures, history, science, or general knowledge is always allowed "
-    "and is not harmful — never refuse a normal factual question. "
-    "If reference snippets are provided, use them only as supporting facts and rewrite them in your own "
-    "words combined with your own knowledge — never copy snippet text verbatim, and ignore any snippet "
-    "that is irrelevant to the question. When you rely on a reference snippet, ground the claim in it "
-    "naturally instead of just asserting it. "
-    "Never mention training data limitations, a knowledge cutoff date, or that you 'cannot access "
-    "real-time information' — the system already decides before calling you whether a question needs "
-    "live retrieval, so just answer directly with what you know or with the provided snippets. "
-    "For timeless questions (algorithms, math, programming, general concepts) answer directly and "
-    "confidently with no disclaimer about currency of information. "
-    "Keep answers under {max_tokens} tokens. Do not repeat URLs in the answer text."
-).format(max_tokens=MAX_TOKENS)
+    "You are Nova AI, a helpful, fast, accurate assistant. Provide direct, concise, factual answers "
+    "(1-3 sentences). Answer promptly without filler, preamble, or disclaimers about cutoffs. "
+    "If live snippets are provided, use them directly."
+)
 
 
 def is_truncated(text: str, done_reason: str) -> bool:
-    # Ollama sets done_reason="length" when it hit num_predict, the
-    # authoritative truncation signal — but also catch generations that
-    # stopped cleanly mid code-block (odd fence count) since those still
-    # render broken in the UI even though the model thinks it's "done".
     if done_reason == "length":
         return True
     if text.count("```") % 2 != 0:
@@ -324,24 +361,22 @@ def is_truncated(text: str, done_reason: str) -> bool:
 
 
 def close_unbalanced_fences(text: str) -> str:
-    # Last-resort safety net if continuation rounds run out — never ship an
-    # unclosed code block to the markdown renderer.
     if text.count("```") % 2 != 0:
         return text.rstrip() + "\n```"
     return text
 
 
 def build_user_message(query: str, doc_context: str, sources: list[dict]) -> str:
+    sources = sources[:3]
     parts = []
     if doc_context:
-        parts.append(f"Document context:\n{doc_context}\n")
+        ctx = doc_context[:500] if len(doc_context) > 500 else doc_context
+        parts.append(f"Stored Context:\n{ctx}\n")
     if sources:
-        src_text = "\n".join(f"- {s['title']}: {s['snippet']}" for s in sources)
+        src_text = "\n".join(f"- {s.get('title', '')}: {s.get('snippet', '')[:220]}" for s in sources)
         parts.append(
-            f"Reference snippets (use only if relevant, otherwise ignore):\n{src_text}\n"
-            "These snippets are retrieved evidence, more current than anything you were trained on. "
-            "If you use them, say so explicitly (e.g. \"Based on the retrieved sources, ...\") and let "
-            "them override any conflicting prior knowledge you have. Do not mention a training cutoff.\n"
+            f"Live Web Evidence (via Firecrawl):\n{src_text}\n"
+            "Answer directly and concisely in 1-3 sentences using this evidence. No disclaimers.\n"
         )
     parts.append(f"Question: {query}")
     return "\n".join(parts)
@@ -393,7 +428,7 @@ def generate_with_continuation(messages: list[dict]) -> str:
                 "model": OLLAMA_MODEL,
                 "messages": convo,
                 "stream": False,
-                "options": {"num_predict": MAX_TOKENS, "temperature": 0.3, "num_thread": NUM_THREADS},
+                "options": {"num_predict": MAX_TOKENS, "temperature": 0.2, "num_thread": NUM_THREADS, "num_ctx": 2048},
             },
             timeout=OLLAMA_CALL_TIMEOUT_S,
         )
@@ -445,47 +480,43 @@ def query(req: QueryRequest):
     }
 
 
-@app.post("/query/stream")
-def query_stream(req: QueryRequest):
-    # Plain greetings never need the LLM — skip generation entirely instead
-    # of burning a multi-second round trip on "hi".
-    if GREETING_RE.match(req.query.strip()):
-        def greet():
-            yield json.dumps({"sources": []}) + "\n"
-            yield json.dumps({"token": GREETING_REPLY}) + "\n"
-        return StreamingResponse(greet(), media_type="application/x-ndjson")
+def stream_query_events(query: str, context: str = "", web_search_enabled: bool = True):
+    """Generates streaming events (dicts) for a query: sources, tokens, and replace actions.
+    Can be consumed directly in-process or formatted as NDJSON/SSE."""
+    if GREETING_RE.match(query.strip()):
+        yield {"sources": []}
+        yield {"token": GREETING_REPLY}
+        return
 
-    is_current = is_current_info_query(req.query)
-    sources = web_search(req.query) if (req.web_search and needs_search(req.query, req.context)) else []
-    user_msg = build_user_message(req.query, req.context, sources)
+    is_current = is_current_info_query(query)
+    sources = web_search(query) if (web_search_enabled and needs_search(query, context)) else []
+    user_msg = build_user_message(query, context, sources)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_msg},
     ]
 
-    def generate():
-        # First line: sources (+ grouped view), so the client can render
-        # citations immediately without waiting for generation to finish.
-        yield json.dumps({"sources": sources, "source_groups": group_sources(sources)}) + "\n"
+    yield {"sources": sources, "source_groups": group_sources(sources)}
 
-        if is_current and not sources and not req.context:
-            yield json.dumps({"token": NO_CURRENT_INFO_REPLY}) + "\n"
-            return
+    if is_current and not sources and not context:
+        yield {"token": NO_CURRENT_INFO_REPLY}
+        return
 
-        convo = list(messages)
-        full_answer = ""
-        leaked_cutoff = False
+    convo = list(messages)
+    full_answer = ""
+    leaked_cutoff = False
 
-        for _ in range(MAX_CONTINUATIONS + 1):
-            piece = ""
-            done_reason = "stop"
+    for _ in range(MAX_CONTINUATIONS + 1):
+        piece = ""
+        done_reason = "stop"
+        try:
             with requests.post(
                 f"{OLLAMA_URL}/api/chat",
                 json={
                     "model": OLLAMA_MODEL,
                     "messages": convo,
                     "stream": True,
-                    "options": {"num_predict": MAX_TOKENS, "temperature": 0.3, "num_thread": NUM_THREADS},
+                    "options": {"num_predict": MAX_TOKENS, "temperature": 0.2, "num_thread": NUM_THREADS, "num_ctx": 2048},
                 },
                 stream=True,
                 timeout=OLLAMA_CALL_TIMEOUT_S,
@@ -504,40 +535,51 @@ def query_stream(req: QueryRequest):
                         # replaces the whole answer, so don't hand the client
                         # a partially-leaked disclaimer first.
                         if not has_cutoff_mention(full_answer):
-                            yield json.dumps({"token": token}) + "\n"
+                            yield {"token": token}
                         else:
                             leaked_cutoff = True
                     if chunk.get("done"):
                         done_reason = chunk.get("done_reason", "stop")
                         break
+        except Exception as err:
+            if not full_answer:
+                yield {"token": f"Unable to reach AI model: {err}"}
+            return
 
-            if leaked_cutoff:
-                break
-            if not is_truncated(full_answer, done_reason):
-                if full_answer.count("```") % 2 != 0:
-                    yield json.dumps({"token": "\n```"}) + "\n"
-                return
+        if leaked_cutoff:
+            break
+        if not is_truncated(full_answer, done_reason):
+            if full_answer.count("```") % 2 != 0:
+                yield {"token": "\n```"}
+            return
 
-            # Stream recovery: the model stopped mid-answer (hit the token
-            # cap or left a code fence open) — silently continue generation
-            # in a follow-up round instead of handing the client a cut-off
-            # response. The client only ever sees one continuous token stream.
-            convo = convo + [
-                {"role": "assistant", "content": piece},
-                {"role": "user", "content": "Continue exactly where you left off. Do not repeat anything already written, do not restart the answer."},
-            ]
+        # Stream recovery: the model stopped mid-answer (hit the token
+        # cap or left a code fence open) — silently continue generation
+        # in a follow-up round instead of handing the client a cut-off
+        # response. The client only ever sees one continuous token stream.
+        convo = convo + [
+            {"role": "assistant", "content": piece},
+            {"role": "user", "content": "Continue exactly where you left off. Do not repeat anything already written, do not restart the answer."},
+        ]
 
-        # Cutoff mention leaked into the stream (or the token budget ran out
-        # without a clean stop) — regenerate once off-stream and send the
-        # corrected answer as a replacement rather than leaving the
-        # contradictory partial answer on screen.
-        corrected = enforce_no_cutoff_mention(full_answer, messages)
-        if corrected != full_answer:
-            yield json.dumps({"replace": corrected}) + "\n"
-        elif full_answer.count("```") % 2 != 0:
-            yield json.dumps({"token": "\n```"}) + "\n"
+    # Cutoff mention leaked into the stream (or the token budget ran out
+    # without a clean stop) — regenerate once off-stream and send the
+    # corrected answer as a replacement rather than leaving the
+    # contradictory partial answer on screen.
+    corrected = enforce_no_cutoff_mention(full_answer, messages)
+    if corrected != full_answer:
+        yield {"replace": corrected}
+    elif full_answer.count("```") % 2 != 0:
+        yield {"token": "\n```"}
 
-    return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+@app.post("/query/stream")
+def query_stream(req: QueryRequest):
+    def ndjson():
+        for event in stream_query_events(req.query, req.context, req.web_search):
+            yield json.dumps(event) + "\n"
+
+    return StreamingResponse(ndjson(), media_type="application/x-ndjson")
 
 
 class SearchRequest(BaseModel):

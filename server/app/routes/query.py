@@ -18,6 +18,10 @@ from ..core import db
 from ..core.config import DEFAULT_USER_ID, RAG_API_URL
 from ..core.logger import logger
 from ..rag import fetch_chunks_for_chat, fetch_images_for_chat
+try:
+    from rag_api.main import stream_query_events
+except ImportError:
+    from server.rag_api.main import stream_query_events
 from ..retrieval.complexity import tier_for
 from ..retrieval.confidence_engine import compute_answer_confidence
 from ..retrieval.retrieval_service import retrieve
@@ -178,43 +182,63 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
                 context_blocks.append(conversation_context)
             context_text = "\n\n".join(context_blocks)
 
-            use_web_search = not has_files and (
-                retrieval_result["confidence"]["label"] != "high" or len(retrieval_result["chunks"]) < tier["minSources"]
+            is_current_query = (
+                retrieval_result.get("metrics", {}).get("intent") == "current_info"
+                or bool(retrieval_result.get("metrics", {}).get("web_searched"))
+            )
+            use_web_search = is_current_query or (
+                retrieval_result["confidence"]["label"] != "high"
+                or len(retrieval_result["chunks"]) < tier["minSources"]
             )
 
             accumulated_text = ""
             sources = []
-            async with httpx.AsyncClient(timeout=180) as client:
-                async with client.stream(
-                    "POST",
-                    f"{RAG_API_URL}/query/stream",
-                    json={"query": query, "context": context_text, "web_search": use_web_search},
-                ) as rag_res:
-                    if rag_res.status_code >= 400:
-                        raise RuntimeError(f"RAG API error: {rag_res.status_code}")
+            is_local_rag = (
+                not RAG_API_URL
+                or "127.0.0.1" in RAG_API_URL
+                or "localhost" in RAG_API_URL
+            )
 
-                    async for line in rag_res.aiter_lines():
-                        if not line.strip():
-                            continue
-                        try:
-                            data = json.loads(line)
-                        except Exception:
-                            continue
-                        if data.get("sources"):
-                            sources = data["sources"]
-                            yield _sse({"text": "", "sources": sources})
-                        if data.get("token"):
-                            accumulated_text += data["token"]
-                            yield _sse({"text": accumulated_text, "sources": sources})
-                        if data.get("replace") is not None:
-                            # rag_api caught its own answer contradicting a
-                            # knowledge-cutoff statement mid-stream and sent a
-                            # corrected full answer to replace it with.
-                            accumulated_text = data["replace"]
-                            yield _sse({"text": accumulated_text, "sources": sources})
+            if is_local_rag:
+                for data in stream_query_events(query, context_text, use_web_search):
+                    if data.get("sources"):
+                        sources = data["sources"][:3]
+                        yield _sse({"text": "", "sources": sources})
+                    if data.get("token"):
+                        accumulated_text += data["token"]
+                        yield _sse({"text": accumulated_text, "sources": sources})
+                    if data.get("replace") is not None:
+                        accumulated_text = data["replace"]
+                        yield _sse({"text": accumulated_text, "sources": sources})
+            else:
+                async with httpx.AsyncClient(timeout=180) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{RAG_API_URL}/query/stream",
+                        json={"query": query, "context": context_text, "web_search": use_web_search},
+                    ) as rag_res:
+                        if rag_res.status_code >= 400:
+                            raise RuntimeError(f"RAG API error: {rag_res.status_code}")
 
-            web_source_cards = [{**s, "type": "web"} for s in sources]
-            all_source_cards = [*retrieval_result["sources"], *web_source_cards]
+                        async for line in rag_res.aiter_lines():
+                            if not line.strip():
+                                continue
+                            try:
+                                data = json.loads(line)
+                            except Exception:
+                                continue
+                            if data.get("sources"):
+                                sources = data["sources"][:3]
+                                yield _sse({"text": "", "sources": sources})
+                            if data.get("token"):
+                                accumulated_text += data["token"]
+                                yield _sse({"text": accumulated_text, "sources": sources})
+                            if data.get("replace") is not None:
+                                accumulated_text = data["replace"]
+                                yield _sse({"text": accumulated_text, "sources": sources})
+
+            web_source_cards = [{**s, "type": "web"} for s in sources][:3]
+            all_source_cards = [*retrieval_result["sources"], *web_source_cards][:3]
             answer_confidence = compute_answer_confidence(
                 source_count=len(all_source_cards),
                 contradictions=[],
@@ -236,7 +260,7 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
                     "exportFormats": ["docx", "pdf", "pptx", "xlsx", "markdown", "txt"],
                 }
 
-            yield _sse({"text": accumulated_text, "sources": all_source_cards, "confidence": answer_confidence, "document": document})
+            yield _sse({"text": accumulated_text, "sources": all_source_cards, "confidence": None, "document": document})
 
             await db.query(
                 "INSERT INTO messages (chat_id, role, content, document) VALUES ($1, $2, $3, $4)",

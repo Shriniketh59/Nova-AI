@@ -124,10 +124,33 @@ async def upload_file(file: UploadFile = File(...)):
                     await upsert_points(COLLECTIONS["documents"]["name"], [{
                         "id": chunk_id,
                         "vector": embedding,
-                        "payload": {"file_id": file_record["id"], "content": content, "page_number": page_number, "original_filename": file.filename},
+                        "payload": {
+                            "file_id": file_record["id"],
+                            "document_id": file_record["id"],
+                            "content": content,
+                            "page_number": page_number,
+                            "original_filename": file.filename,
+                            "title": file.filename,
+                            "source_type": "file",
+                            "freshness_score": 1.0,
+                            "content_hash": file_hash,
+                        },
                     }])
                 except Exception:
                     pass
+
+        # Also register in refresh_manager for in-memory hybrid search
+        try:
+            from ..knowledge.refresh_pipeline import refresh_manager
+            await refresh_manager.ingest_or_update(
+                source_id=file_record["id"],
+                content=parsed["text"],
+                title=file.filename,
+                source_type="file",
+                category="document",
+            )
+        except Exception:
+            pass
 
         await db.query("UPDATE uploaded_files SET ingest_status = 'indexed' WHERE id = $1", [file_record["id"]])
         await db.query("UPDATE indexing_jobs SET status = 'done', updated_at = now() WHERE id = $1", [job_id])

@@ -6,11 +6,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .core.config import QDRANT_URL, NODE_ENV
+from .core.config import QDRANT_URL, NODE_ENV, PORT
 from .core.db import init_db
 from .core.logger import logger
 from .retrieval.qdrant_client import ensure_all_collections
-from .routes import chats, upload, query, agent_chat, ide_agent, fs_route, nova_route, health, translate, interview_coach, documents
+from .routes import chats, upload, query, agent_chat, ide_agent, fs_route, nova_route, health, translate, interview_coach, documents, voice_route
+try:
+    from rag_api.main import app as rag_app
+except ImportError:
+    from server.rag_api.main import app as rag_app
 
 app = FastAPI()
 
@@ -59,6 +63,9 @@ app.include_router(health.router)
 app.include_router(translate.router)
 app.include_router(interview_coach.router)
 app.include_router(documents.router)
+app.include_router(voice_route.router)
+app.include_router(rag_app.router)
+app.include_router(rag_app.router, prefix="/api")
 
 DIST_PATH = os.path.join(os.path.dirname(__file__), "../../dist")
 if os.path.isdir(DIST_PATH):
@@ -81,7 +88,14 @@ async def spa_fallback(full_path: str):
 
     index_path = os.path.join(DIST_PATH, "index.html")
     if os.path.exists(index_path):
-        return FileResponse(index_path)
+        return FileResponse(
+            index_path,
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
     raise HTTPException(status_code=404, detail="Not built")
 
 
@@ -89,10 +103,20 @@ async def spa_fallback(full_path: str):
 async def on_startup():
     if NODE_ENV == "test":
         return
-    await init_db()
+    try:
+        await init_db()
+        logger.info("Postgres database initialized.")
+    except Exception as err:
+        logger.warn("Postgres unreachable, database operations will fail until DB is started", {"error": str(err)})
     if QDRANT_URL:
         try:
             await ensure_all_collections()
             logger.info("Qdrant collections ready.")
         except Exception as err:
             logger.warn("Qdrant unreachable, falling back to in-Python search", {"error": str(err)})
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=PORT, reload=False)
+

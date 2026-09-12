@@ -14,15 +14,7 @@ const STARTER = {
 };
 
 function ConfidenceBadge({ confidence }) {
-  if (!confidence) return null;
-  const color = confidence.label === 'high' ? 'text-emerald-400 border-emerald-400/30 bg-emerald-400/10'
-    : confidence.label === 'medium' ? 'text-amber-400 border-amber-400/30 bg-amber-400/10'
-    : 'text-rose-400 border-rose-400/30 bg-rose-400/10';
-  return (
-    <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border ${color}`}>
-      {confidence.score}% confidence — {confidence.label}
-    </span>
-  );
+  return null;
 }
 
 export default function Coach() {

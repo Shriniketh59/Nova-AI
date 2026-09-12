@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import MessageContent from '../components/MessageContent';
-import ConfidenceBadge from '../components/ConfidenceBadge';
 import SourceCard from '../components/SourceCard';
 import DocumentCard from '../components/DocumentCard';
 import ImageAnalysisPanel from '../components/ImageAnalysisPanel';
+import VoiceAssistantModal from '../components/VoiceAssistantModal';
 
 // Cheap heuristic, no LLM call — keeps the fast path actually fast. Routes
 // comparisons/analysis/long multi-part questions to the deep critical-thinking
@@ -45,13 +45,54 @@ export default function Chat() {
   const [input, setInput] = useState('');
   const [attachment, setAttachment] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
-  
+  const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
+  const [isDictating, setIsDictating] = useState(false);
+
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
+  const dictationRef = useRef(null);
   // Set right before navigate() when a chat is created from a send-in-progress.
   // Skips the next chatId-driven reload so it doesn't wipe the in-flight
   // streaming placeholder with an empty messages list from the backend.
   const skipNextLoadRef = useRef(false);
+
+  const toggleDictation = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setIsVoiceModalOpen(true);
+      return;
+    }
+    if (isDictating) {
+      if (dictationRef.current) {
+        dictationRef.current.stop();
+      }
+      setIsDictating(false);
+      return;
+    }
+    try {
+      const rec = new SpeechRecognition();
+      rec.continuous = false;
+      rec.interimResults = true;
+      rec.lang = localStorage.getItem('nova_voice_lang') || 'en-IN';
+      rec.onstart = () => setIsDictating(true);
+      rec.onresult = (e) => {
+        let text = '';
+        for (let i = 0; i < e.results.length; ++i) {
+          text += e.results[i][0].transcript;
+        }
+        if (text) {
+          setInput((prev) => (prev ? `${prev} ${text}` : text));
+        }
+      };
+      rec.onend = () => setIsDictating(false);
+      rec.onerror = () => setIsDictating(false);
+      dictationRef.current = rec;
+      rec.start();
+    } catch (err) {
+      console.warn('Dictation error:', err);
+      setIsVoiceModalOpen(true);
+    }
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -311,48 +352,51 @@ export default function Chat() {
     }
   };
 
-  const QuickActionButton = ({ icon: Icon, label }) => (
-    <button className="flex items-center space-x-2 px-4 py-2.5 rounded-full border border-white/10 hover:bg-white/5 text-sm text-zinc-300 font-medium transition-all duration-200">
-      <Icon className="w-4 h-4 text-purple-400" />
+  const QuickActionButton = ({ icon: Icon, label, promptText }) => (
+    <button
+      onClick={() => {
+        if (promptText) {
+          setInput(promptText);
+        }
+      }}
+      className="flex items-center space-x-2 px-4 py-2.5 rounded-xl border border-white/10 bg-zinc-900/60 hover:bg-white/[0.08] hover:border-purple-500/40 text-sm text-zinc-300 hover:text-white font-medium transition-all duration-200 shadow-sm backdrop-blur-sm group"
+    >
+      <Icon className="w-4 h-4 text-purple-400 group-hover:scale-110 transition-transform" />
       <span>{label}</span>
     </button>
   );
 
   return (
-    <div className="flex flex-col h-full bg-[#0B0B0F] text-zinc-100">
+    <div className="flex flex-col h-full bg-[#09090D] text-zinc-100">
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-6">
+      <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6">
         {messages.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center max-w-2xl mx-auto w-full space-y-8 animate-fade-in">
-            <div className="w-16 h-16 flex items-center justify-center">
-              <img src="/logo.png" alt="Nova AI" className="w-full h-full object-contain" />
+          <div className="h-full flex flex-col items-center justify-center max-w-2xl mx-auto w-full space-y-8 animate-fade-in my-auto py-12">
+            <div className="relative">
+              <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-purple-500/20 via-zinc-800 to-zinc-900 border border-purple-500/30 p-3.5 shadow-xl shadow-purple-500/10 flex items-center justify-center">
+                <img src="/logo.png" alt="Nova AI" className="w-full h-full object-contain" />
+              </div>
+              <span className="absolute -bottom-1 -right-1 w-4 h-4 bg-emerald-500 rounded-full border-2 border-[#09090D]"></span>
             </div>
-            <h2 className="text-2xl font-semibold text-white tracking-tight">How can I help you today?</h2>
             
-            <div className="flex flex-wrap justify-center gap-3 w-full">
+            <div className="text-center space-y-2">
+              <h2 className="text-2xl sm:text-3xl font-bold text-white tracking-tight bg-gradient-to-r from-white via-zinc-200 to-zinc-400 bg-clip-text text-transparent">
+                How can Nova assist you today?
+              </h2>
+              <p className="text-sm text-zinc-400 max-w-md mx-auto">
+                Accurate code generation, multimodal document analysis, deep research, and technical reasoning.
+              </p>
+            </div>
+            
+            <div className="flex flex-wrap justify-center gap-2.5 w-full max-w-lg">
               <QuickActionButton 
                 icon={(props) => (
                   <svg {...props} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
                   </svg>
                 )} 
-                label="Code" 
-              />
-              <QuickActionButton 
-                icon={(props) => (
-                  <svg {...props} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                  </svg>
-                )} 
-                label="Image" 
-              />
-              <QuickActionButton 
-                icon={(props) => (
-                  <svg {...props} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                  </svg>
-                )} 
-                label="Video" 
+                label="Code Specialist"
+                promptText="Write a clean and optimized " 
               />
               <QuickActionButton 
                 icon={(props) => (
@@ -360,7 +404,8 @@ export default function Chat() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9.5a2.5 2.5 0 00-2.5-2.5H15" />
                   </svg>
                 )} 
-                label="Research" 
+                label="Deep Research"
+                promptText="Explain the key architecture and trade-offs of " 
               />
               <QuickActionButton 
                 icon={(props) => (
@@ -368,50 +413,74 @@ export default function Chat() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                   </svg>
                 )} 
-                label="Documents" 
+                label="Document RAG"
+                promptText="Analyze this attached document and summarize its findings" 
+              />
+              <QuickActionButton 
+                icon={(props) => (
+                  <svg {...props} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                )} 
+                label="Vision & Media"
+                promptText="Analyze this image and describe " 
               />
             </div>
           </div>
         ) : (
-          <div className="max-w-3xl mx-auto w-full space-y-6 pb-20">
+          <div className="max-w-4xl mx-auto w-full space-y-6 pb-20">
             {messages.map((msg, idx) => (
-              <div key={idx} className={`flex gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+              <div key={idx} className={`flex gap-3.5 sm:gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
                 {/* Avatar */}
-                <div className={`w-8 h-8 flex-shrink-0 rounded-md flex items-center justify-center font-bold text-[10px]
-                  ${msg.role === 'user' ? 'bg-zinc-800 text-white' : ''}`}>
-                  {msg.role === 'user' ? 'YOU' : <img src="/logo.png" alt="Nova AI" className="w-full h-full object-contain rounded-md" />}
+                <div className={`w-8 h-8 sm:w-9 sm:h-9 flex-shrink-0 rounded-xl flex items-center justify-center font-bold text-[11px] shadow-md
+                  ${msg.role === 'user' 
+                    ? 'bg-gradient-to-tr from-purple-700 to-indigo-600 text-white border border-purple-400/30' 
+                    : 'bg-zinc-900 border border-white/10 p-1'}`}>
+                  {msg.role === 'user' ? 'YOU' : <img src="/logo.png" alt="Nova AI" className="w-full h-full object-contain rounded-lg" />}
                 </div>
                 
-                {/* Message Bubble */}
-                <div className={`max-w-[80%] rounded-2xl px-5 py-3.5 shadow-sm ${
+                {/* Message Bubble Card */}
+                <div className={`max-w-[85%] sm:max-w-[80%] rounded-2xl transition-all ${
                   msg.role === 'user' 
-                    ? 'bg-zinc-800/80 border border-white/5 text-zinc-100' 
-                    : 'bg-transparent text-zinc-100'
+                    ? 'px-4 sm:px-5 py-3.5 bg-gradient-to-b from-zinc-800/90 to-zinc-900/90 border border-white/10 text-zinc-100 shadow-lg shadow-black/20' 
+                    : 'px-4 sm:px-6 py-4 bg-zinc-900/60 border border-white/[0.07] text-zinc-100 shadow-xl shadow-black/40 backdrop-blur-sm'
                 }`}>
+                  {msg.role === 'ai' && !msg.isThinking && (
+                    <div className="flex items-center justify-between gap-3 pb-2.5 mb-3 border-b border-white/5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold text-purple-300 tracking-wide">Nova Assistant</span>
+                      </div>
+                    </div>
+                  )}
+
                   {msg.attachment && (
-                    <div className="mb-3">
+                    <div className="mb-3.5">
                       {msg.attachment.type?.startsWith('image/') || msg.attachment.url ? (
                         <img 
                           src={msg.attachment.url || '/logo.png'} 
                           alt="Uploaded attachment" 
-                          className="max-w-xs rounded-lg border border-white/10" 
+                          className="max-w-xs rounded-xl border border-white/10 shadow-md" 
                         />
                       ) : (
-                        <div className="flex items-center space-x-3 p-3 bg-white/5 border border-white/10 rounded-lg max-w-xs">
-                          <svg className="w-6 h-6 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <div className="flex items-center space-x-3 p-3 bg-zinc-800/70 border border-white/10 rounded-xl max-w-xs shadow-sm">
+                          <svg className="w-5 h-5 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                           </svg>
-                          <span className="text-sm font-medium truncate">{msg.attachment.name || 'Document'}</span>
+                          <span className="text-xs font-medium truncate text-zinc-200">{msg.attachment.name || 'Document'}</span>
                         </div>
                       )}
                     </div>
                   )}
+
                   {msg.isThinking ? (
-                    <div className="flex items-center gap-2 py-1">
+                    <div className="flex items-center gap-3 py-2">
                       <img src="/logo.png" alt="" className="w-6 h-6 object-contain animate-nova-thinking" />
-                      <span className="text-sm text-zinc-400 animate-pulse">
-                        {msg.stageLabel || 'Thinking...'}
-                      </span>
+                      <div className="flex flex-col">
+                        <span className="text-sm font-medium text-purple-300 animate-pulse-subtle">
+                          {msg.stageLabel || 'Synthesizing response...'}
+                        </span>
+                        <span className="text-[11px] text-zinc-500">Evaluating prompt and validating facts</span>
+                      </div>
                     </div>
                   ) : (
                     <>
@@ -422,13 +491,11 @@ export default function Chat() {
                       ) : (
                         msg.content && <MessageContent content={msg.content} />
                       )}
+
                       {msg.sources && msg.sources.length > 0 && (
-                        <div className="mt-3 pt-3 border-t border-white/10">
-                          <div className="flex items-center justify-between mb-2">
-                            <p className="text-xs font-medium text-zinc-500">Sources</p>
-                            {/* Confidence now comes from the Review stage's LLM critique of the
-                                final answer against all gathered evidence, not just doc-match score. */}
-                            <ConfidenceBadge confidence={msg.confidence} />
+                        <div className="mt-4 pt-3.5 border-t border-white/5">
+                          <div className="flex items-center justify-between mb-2.5">
+                            <p className="text-xs font-semibold text-zinc-400 tracking-wide uppercase">Supporting Evidence</p>
                           </div>
                           {msg.contradictions && msg.contradictions.length > 0 && (
                             <p className="text-[11px] text-amber-400/90 mb-2">
@@ -449,6 +516,7 @@ export default function Chat() {
           </div>
         )}
       </div>
+
 
       {/* Input Area */}
       <div className="p-4 bg-gradient-to-t from-[#0B0B0F] via-[#0B0B0F] to-transparent">
@@ -527,14 +595,31 @@ export default function Chat() {
             />
 
             <div className="flex items-center p-2 m-1">
-              {/* Voice Placeholder */}
+              {/* Dictation Toggle */}
               <button 
                 type="button" 
-                className="p-2 text-zinc-400 hover:text-white transition-colors rounded-xl hover:bg-white/5 mr-1"
-                title="Voice input"
+                onClick={toggleDictation}
+                className={`p-2 transition-all rounded-xl mr-1 ${
+                  isDictating
+                    ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40 animate-pulse'
+                    : 'text-zinc-400 hover:text-white hover:bg-white/5'
+                }`}
+                title={isDictating ? "Stop speech dictation" : "Dictate speech to text"}
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                </svg>
+              </button>
+
+              {/* Gemini Voice Mode Interactive Assistant Button */}
+              <button
+                type="button"
+                onClick={() => setIsVoiceModalOpen(true)}
+                className="p-2 text-purple-300 hover:text-white transition-all rounded-xl hover:bg-purple-600/20 mr-1 border border-purple-500/30 hover:border-purple-400/60 bg-gradient-to-tr from-purple-950/40 to-indigo-950/40 shadow-sm"
+                title="Launch Gemini Hands-Free Voice Assistant"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
                 </svg>
               </button>
               
@@ -550,11 +635,26 @@ export default function Chat() {
               </button>
             </div>
           </form>
-          <div className="text-center mt-3">
+          <div className="text-center mt-3 flex items-center justify-center gap-2">
             <span className="text-[11px] text-zinc-500">Nova AI can make mistakes. Consider verifying important information.</span>
+            <span className="text-zinc-700">•</span>
+            <button
+              onClick={() => setIsVoiceModalOpen(true)}
+              className="text-[11px] text-purple-400 hover:text-purple-300 font-medium transition-colors inline-flex items-center gap-1"
+            >
+              <span>✨ Try Gemini Voice</span>
+            </button>
           </div>
         </div>
       </div>
+
+      {/* Interactive Gemini Voice Assistant Modal */}
+      <VoiceAssistantModal
+        isOpen={isVoiceModalOpen}
+        onClose={() => setIsVoiceModalOpen(false)}
+        activeChatId={chatId}
+        onMessageAdded={(newMsg) => setMessages((prev) => [...prev, newMsg])}
+      />
     </div>
   );
 }

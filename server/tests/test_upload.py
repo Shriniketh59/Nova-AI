@@ -2,7 +2,7 @@ import pytest
 import respx
 from httpx import Response
 
-from .conftest import requires_db
+from conftest import requires_db
 
 
 @requires_db
