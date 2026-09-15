@@ -1,7 +1,6 @@
 import time
 
 from ..core.logger import logger
-from ..retrieval.confidence_engine import compute_answer_confidence
 from ..utils.context_manager import get_conversation_context
 from .base_agent import BaseAgent
 from .memory_agent import memory_agent
@@ -126,28 +125,21 @@ class SupervisorAgent(BaseAgent):
             answer = reasoning_result["output"]["answer"]
             critique = await self.review.critique(answer, question, evidence_summary, contradictions)
 
-        grounded_confidence = compute_answer_confidence(
-            source_count=source_count,
-            contradictions=contradictions,
-            doc_confidence=doc_confidence,
-            has_web_sources=any(e.get("type") == "web" for e in evidence),
-            trust_tiers=trust_tiers,
-            category=category,
-        )
-        blended_score = (
-            round((grounded_confidence["score"] + critique["confidenceScore"]) / 2)
-            if critique["pass"]
-            else max(0, min(grounded_confidence["score"], critique["confidenceScore"]) - 15)
-        )
-        confidence = (
-            {"score": 0, "label": "low", "reason": "Evidence remained insufficient after broadening retrieval — stated rather than guessed."}
-            if verification_failed
-            else {
+        # Simple inline confidence — no longer uses confidence_engine module
+        if verification_failed:
+            confidence = {"score": 0, "label": "low", "reason": "Evidence remained insufficient after broadening retrieval."}
+        else:
+            blended_score = (
+                round((source_count * 8 + 30 + critique["confidenceScore"]) / 2)
+                if critique["pass"]
+                else max(0, min(50, critique["confidenceScore"]) - 15)
+            )
+            blended_score = max(0, min(100, blended_score))
+            confidence = {
                 "score": blended_score,
                 "label": "high" if blended_score >= 70 else "medium" if blended_score >= 30 else "low",
-                "reason": critique["confidenceReason"] or grounded_confidence["reason"],
+                "reason": critique.get("confidenceReason") or f"{source_count} source(s) used.",
             }
-        )
 
         logger.info("supervisor.stage", {"chatId": chat_id, "stage": last_stage, "latencyMs": round((time.time() - stage_start) * 1000)})
 

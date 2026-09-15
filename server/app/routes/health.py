@@ -8,6 +8,8 @@ from ..retrieval.qdrant_client import ensure_all_collections
 router = APIRouter()
 
 
+@router.get("/health")
+@router.get("/api/health")
 @router.get("/api/v1/health")
 async def health():
     """Contract mirrors sret-rag's GET /api/v1/health: {status, index_ready, model}."""

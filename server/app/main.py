@@ -11,10 +11,7 @@ from .core.db import init_db
 from .core.logger import logger
 from .retrieval.qdrant_client import ensure_all_collections
 from .routes import chats, upload, query, agent_chat, ide_agent, fs_route, nova_route, health, translate, interview_coach, documents, voice_route
-try:
-    from rag_api.main import app as rag_app
-except ImportError:
-    from server.rag_api.main import app as rag_app
+from .routes import orchestrator_route, local_voice_ws
 
 app = FastAPI()
 
@@ -64,8 +61,8 @@ app.include_router(translate.router)
 app.include_router(interview_coach.router)
 app.include_router(documents.router)
 app.include_router(voice_route.router)
-app.include_router(rag_app.router)
-app.include_router(rag_app.router, prefix="/api")
+app.include_router(orchestrator_route.router)
+app.include_router(local_voice_ws.router)
 
 DIST_PATH = os.path.join(os.path.dirname(__file__), "../../dist")
 if os.path.isdir(DIST_PATH):

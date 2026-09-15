@@ -256,14 +256,16 @@ class DDGSWebRetriever(WebRetriever):
 
 
 def get_web_retriever(provider: Optional[str] = None) -> WebRetriever:
-    """Factory function: resolves the appropriate web retriever provider (default: Firecrawl)."""
-    p = (provider or os.environ.get("WEB_RETRIEVER_PROVIDER") or "firecrawl").lower()
+    """Factory: resolves the appropriate web retriever. Default is DDGS (no API key needed)."""
+    p = (provider or os.environ.get("WEB_RETRIEVER_PROVIDER") or "ddgs").lower()
 
-    if p == "tavily" or (p == "auto" and TAVILY_API_KEY):
+    if p == "tavily" and TAVILY_API_KEY:
         return TavilyWebRetriever()
-    if p == "exa" or (p == "auto" and EXA_API_KEY):
+    if p == "exa" and EXA_API_KEY:
         return ExaWebRetriever()
+    if p == "firecrawl" and FIRECRAWL_API_KEY:
+        return FirecrawlWebRetriever()
 
-    # Default to Firecrawl (with graceful fallback)
-    return FirecrawlWebRetriever()
+    # Default: DDGS — zero configuration, no API key
+    return DDGSWebRetriever()
 

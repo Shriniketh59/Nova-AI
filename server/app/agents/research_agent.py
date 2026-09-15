@@ -3,12 +3,8 @@ import re
 
 import httpx
 
-from ..core.config import RAG_API_URL
+from ..core.config import OLLAMA_URL
 from ..rag import generate_embedding, cosine_similarity
-try:
-    from rag_api.main import web_search
-except ImportError:
-    from server.rag_api.main import web_search
 from ..retrieval.retrieval_service import retrieve
 from ..retrieval.complexity import tier_for
 from ..retrieval.source_trust import rank_sources, count_trust_tiers
@@ -62,24 +58,21 @@ def detect_fact_disagreements(evidence: list[dict]) -> list[dict]:
 
 
 async def _fetch_web_sources(query: str, max_results: int = 5) -> list[dict]:
-    is_local_rag = (
-        not RAG_API_URL
-        or "127.0.0.1" in RAG_API_URL
-        or "localhost" in RAG_API_URL
-    )
-    if is_local_rag:
-        try:
-            return web_search(query, max_results=max_results)
-        except Exception:
-            return []
-
+    """DDGS web search — no API key, fully local."""
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            res = await client.post(f"{RAG_API_URL}/search", json={"query": query, "max_results": max_results})
-            if res.status_code >= 400:
-                return []
-            data = res.json()
-            return data.get("sources", [])
+        from ddgs import DDGS
+        results = []
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        return [
+            {
+                "title": r.get("title", ""),
+                "url": r.get("href", ""),
+                "snippet": (r.get("body", "") or "")[:400],
+                "type": "web",
+            }
+            for r in results
+        ][:max_results]
     except Exception:
         return []
 

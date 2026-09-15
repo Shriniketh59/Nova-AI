@@ -46,53 +46,15 @@ export default function Chat() {
   const [attachment, setAttachment] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
-  const [isDictating, setIsDictating] = useState(false);
 
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
-  const dictationRef = useRef(null);
   // Set right before navigate() when a chat is created from a send-in-progress.
   // Skips the next chatId-driven reload so it doesn't wipe the in-flight
   // streaming placeholder with an empty messages list from the backend.
   const skipNextLoadRef = useRef(false);
 
-  const toggleDictation = () => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setIsVoiceModalOpen(true);
-      return;
-    }
-    if (isDictating) {
-      if (dictationRef.current) {
-        dictationRef.current.stop();
-      }
-      setIsDictating(false);
-      return;
-    }
-    try {
-      const rec = new SpeechRecognition();
-      rec.continuous = false;
-      rec.interimResults = true;
-      rec.lang = localStorage.getItem('nova_voice_lang') || 'en-IN';
-      rec.onstart = () => setIsDictating(true);
-      rec.onresult = (e) => {
-        let text = '';
-        for (let i = 0; i < e.results.length; ++i) {
-          text += e.results[i][0].transcript;
-        }
-        if (text) {
-          setInput((prev) => (prev ? `${prev} ${text}` : text));
-        }
-      };
-      rec.onend = () => setIsDictating(false);
-      rec.onerror = () => setIsDictating(false);
-      dictationRef.current = rec;
-      rec.start();
-    } catch (err) {
-      console.warn('Dictation error:', err);
-      setIsVoiceModalOpen(true);
-    }
-  };
+
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -554,7 +516,7 @@ export default function Chat() {
           {isUploading && (
             <div className="mb-3 p-2.5 bg-zinc-800/80 border border-white/10 rounded-xl inline-flex items-center gap-3 shadow-lg backdrop-blur-md">
               <div className="w-5 h-5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-              <span className="text-xs text-zinc-300">Uploading and indexing document for RAG...</span>
+              <span className="text-xs text-zinc-300">Uploading and indexing document...</span>
             </div>
           )}
 
@@ -595,31 +557,15 @@ export default function Chat() {
             />
 
             <div className="flex items-center p-2 m-1">
-              {/* Dictation Toggle */}
-              <button 
-                type="button" 
-                onClick={toggleDictation}
-                className={`p-2 transition-all rounded-xl mr-1 ${
-                  isDictating
-                    ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40 animate-pulse'
-                    : 'text-zinc-400 hover:text-white hover:bg-white/5'
-                }`}
-                title={isDictating ? "Stop speech dictation" : "Dictate speech to text"}
-              >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-                </svg>
-              </button>
-
-              {/* Gemini Voice Mode Interactive Assistant Button */}
+              {/* Local Voice Assistant Button */}
               <button
                 type="button"
                 onClick={() => setIsVoiceModalOpen(true)}
                 className="p-2 text-purple-300 hover:text-white transition-all rounded-xl hover:bg-purple-600/20 mr-1 border border-purple-500/30 hover:border-purple-400/60 bg-gradient-to-tr from-purple-950/40 to-indigo-950/40 shadow-sm"
-                title="Launch Gemini Hands-Free Voice Assistant"
+                title="Launch Local Voice Assistant (faster-whisper + llama3.2 + pyttsx3)"
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                 </svg>
               </button>
               
@@ -642,13 +588,13 @@ export default function Chat() {
               onClick={() => setIsVoiceModalOpen(true)}
               className="text-[11px] text-purple-400 hover:text-purple-300 font-medium transition-colors inline-flex items-center gap-1"
             >
-              <span>✨ Try Gemini Voice</span>
+              <span>🎙️ Try Voice Mode</span>
             </button>
           </div>
         </div>
       </div>
 
-      {/* Interactive Gemini Voice Assistant Modal */}
+      {/* Local Voice Assistant Modal */}
       <VoiceAssistantModal
         isOpen={isVoiceModalOpen}
         onClose={() => setIsVoiceModalOpen(false)}

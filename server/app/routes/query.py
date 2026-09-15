@@ -15,20 +15,16 @@ from ..agents.memory_agent import memory_agent
 from ..agents.resume_analysis_agent import ResumeAnalysisAgent
 from ..agents.vision_agent import VisionAgent
 from ..core import db
-from ..core.config import DEFAULT_USER_ID, RAG_API_URL
+from ..core.config import DEFAULT_USER_ID
 from ..core.logger import logger
 from ..rag import fetch_chunks_for_chat, fetch_images_for_chat
-try:
-    from rag_api.main import stream_query_events
-except ImportError:
-    from server.rag_api.main import stream_query_events
+from ..orchestrator.local_orchestrator import orchestrate_stream
 from ..retrieval.complexity import tier_for
-from ..retrieval.confidence_engine import compute_answer_confidence
 from ..retrieval.retrieval_service import retrieve
 from ..services.ats_service import calculate_ats_score, format_ats_answer
 from ..services.document_type_detector import detect_document_request, build_summary
 from ..services.rag_service import run_rag_query
-from ..services.task_router import classify_task, classify_topic
+from ..services.task_router import classify_task
 from ..utils.context_manager import get_conversation_context
 
 router = APIRouter()
@@ -90,7 +86,7 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
 
                 await db.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)", [chat_id, "ai", answer])
                 await db.query("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [chat_id])
-                yield _sse({"text": answer, "sources": [{"filename": image["original_filename"], "type": "image"}], "confidence": confidence})
+                yield _sse({"text": answer, "sources": [{"filename": image["original_filename"], "type": "image"}]})
                 yield "data: [DONE]\n\n"
                 return
 
@@ -121,7 +117,7 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
                     await db.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)", [chat_id, "ai", code_answer])
                     await db.query("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [chat_id])
 
-                    yield _sse({"text": code_answer, "sources": [], "confidence": confidence})
+                    yield _sse({"text": code_answer, "sources": []})
                 except Exception as err:
                     logger.error("codeAgent.failed", {"chatId": chat_id, "error": str(err)})
                     yield _sse({"error": str(err)})
@@ -145,107 +141,59 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
 
                     await db.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)", [chat_id, "ai", answer])
                     await db.query("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [chat_id])
-                    yield _sse({"text": answer, "sources": source_cards, "confidence": confidence})
+                    yield _sse({"text": answer, "sources": source_cards})
                     yield "data: [DONE]\n\n"
                     return
 
                 if task["type"] == "ats":
                     ats_result = calculate_ats_score(document_text)
                     answer = format_ats_answer(ats_result)
-                    confidence = {"score": ats_result["score"], "label": "high" if ats_result["score"] >= 70 else "medium" if ats_result["score"] >= 30 else "low", "reason": "Calculated from parsed resume content."}
                 elif task["type"] == "resume_analysis":
                     result = await resume_analysis_agent.run(query, {"documentText": document_text, "fileName": file_name})
                     answer = result["output"]["answer"]
-                    confidence = {"score": 75 if result["success"] else 0, "label": "high" if result["success"] else "low", "reason": "Based on uploaded resume content only."}
                 else:
                     result = await document_analysis_agent.run(query, {"documentText": document_text, "fileName": file_name})
                     answer = result["output"]["answer"]
-                    confidence = {"score": 75 if result["success"] else 0, "label": "high" if result["success"] else "low", "reason": "Based on uploaded document content only."}
 
                 await db.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)", [chat_id, "ai", answer])
                 await db.query("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [chat_id])
-                yield _sse({"text": answer, "sources": [{"filename": file_name, "type": "document"}], "confidence": confidence})
+                yield _sse({"text": answer, "sources": [{"filename": file_name, "type": "document"}]})
                 yield "data: [DONE]\n\n"
                 return
 
-            tier = tier_for(query)
-            retrieval_result = await retrieve(query, chat_id, top_k=tier["topK"])
-            memories = await memory_agent.get_relevant_memories(chat_id, query, user_msg["id"], 3)
-            conversation_context = await get_conversation_context(chat_id)
-
-            context_blocks = []
-            if retrieval_result["contextText"]:
-                context_blocks.append(f"[Document context]\n{retrieval_result['contextText']}")
-            if memories:
-                context_blocks.append(f"[Relevant earlier facts]\n{chr(10).join(memories)}")
-            if conversation_context:
-                context_blocks.append(conversation_context)
-            context_text = "\n\n".join(context_blocks)
-
-            is_current_query = (
-                retrieval_result.get("metrics", {}).get("intent") == "current_info"
-                or bool(retrieval_result.get("metrics", {}).get("web_searched"))
-            )
-            use_web_search = is_current_query or (
-                retrieval_result["confidence"]["label"] != "high"
-                or len(retrieval_result["chunks"]) < tier["minSources"]
-            )
-
+            # Use local orchestrator for general queries
             accumulated_text = ""
             sources = []
-            is_local_rag = (
-                not RAG_API_URL
-                or "127.0.0.1" in RAG_API_URL
-                or "localhost" in RAG_API_URL
-            )
 
-            if is_local_rag:
-                for data in stream_query_events(query, context_text, use_web_search):
-                    if data.get("sources"):
-                        sources = data["sources"][:3]
-                        yield _sse({"text": "", "sources": sources})
-                    if data.get("token"):
-                        accumulated_text += data["token"]
-                        yield _sse({"text": accumulated_text, "sources": sources})
-                    if data.get("replace") is not None:
-                        accumulated_text = data["replace"]
-                        yield _sse({"text": accumulated_text, "sources": sources})
-            else:
-                async with httpx.AsyncClient(timeout=180) as client:
-                    async with client.stream(
-                        "POST",
-                        f"{RAG_API_URL}/query/stream",
-                        json={"query": query, "context": context_text, "web_search": use_web_search},
-                    ) as rag_res:
-                        if rag_res.status_code >= 400:
-                            raise RuntimeError(f"RAG API error: {rag_res.status_code}")
+            # Build conversation context for orchestrator
+            conversation_history = []
+            try:
+                ctx_rows = await db.query(
+                    "SELECT role, content FROM messages WHERE chat_id = $1 ORDER BY created_at DESC LIMIT 8",
+                    [chat_id],
+                )
+                conversation_history = list(reversed(ctx_rows["rows"]))
+            except Exception:
+                pass
 
-                        async for line in rag_res.aiter_lines():
-                            if not line.strip():
-                                continue
-                            try:
-                                data = json.loads(line)
-                            except Exception:
-                                continue
-                            if data.get("sources"):
-                                sources = data["sources"][:3]
-                                yield _sse({"text": "", "sources": sources})
-                            if data.get("token"):
-                                accumulated_text += data["token"]
-                                yield _sse({"text": accumulated_text, "sources": sources})
-                            if data.get("replace") is not None:
-                                accumulated_text = data["replace"]
-                                yield _sse({"text": accumulated_text, "sources": sources})
+            async for data in orchestrate_stream(
+                query=query,
+                chat_id=chat_id,
+                conversation_history=conversation_history,
+                is_voice=False,
+            ):
+                if data.get("sources"):
+                    sources = data["sources"][:3]
+                    yield _sse({"text": "", "sources": sources})
+                if data.get("token"):
+                    accumulated_text += data["token"]
+                    yield _sse({"text": accumulated_text, "sources": sources})
+                if data.get("replace") is not None:
+                    accumulated_text = data["replace"]
+                    yield _sse({"text": accumulated_text, "sources": sources})
 
             web_source_cards = [{**s, "type": "web"} for s in sources][:3]
-            all_source_cards = [*retrieval_result["sources"], *web_source_cards][:3]
-            answer_confidence = compute_answer_confidence(
-                source_count=len(all_source_cards),
-                contradictions=[],
-                doc_confidence=retrieval_result["confidence"],
-                has_web_sources=len(web_source_cards) > 0,
-                category=classify_topic(query),
-            )
+            all_source_cards = web_source_cards[:3]
 
             doc_type = detect_document_request(query)
             document = None
@@ -260,7 +208,7 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
                     "exportFormats": ["docx", "pdf", "pptx", "xlsx", "markdown", "txt"],
                 }
 
-            yield _sse({"text": accumulated_text, "sources": all_source_cards, "confidence": None, "document": document})
+            yield _sse({"text": accumulated_text, "sources": all_source_cards, "document": document})
 
             await db.query(
                 "INSERT INTO messages (chat_id, role, content, document) VALUES ($1, $2, $3, $4)",

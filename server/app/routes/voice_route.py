@@ -1,11 +1,24 @@
-import os
+"""
+Voice routes — local-only, no external AI APIs.
+
+Endpoints:
+  POST /api/voice/chat      — text-in voice reply (Ollama LLM, local TTS)
+  POST /api/voice/retrieval — Vector DB knowledge retrieval for voice
+  GET  /api/voice/config    — voice engine capabilities
+
+Removed:
+  - /api/voice/token        (Gemini Live ephemeral token — obsolete)
+  - /ws/voice/live          (Gemini Live WebSocket — replaced by /ws/voice/local)
+  - /api/settings/gemini    (Gemini key management — not needed)
+"""
 import re
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..core import db
-from ..core.config import GEMINI_API_KEY, DEFAULT_USER_ID
-from ..services.voice_service import generate_voice_reply
+from ..core.config import DEFAULT_USER_ID
+from ..core.logger import logger
 
 router = APIRouter()
 
@@ -13,89 +26,36 @@ router = APIRouter()
 class VoiceChatRequest(BaseModel):
     message: str
     chatId: str | None = None
-    apiKey: str | None = None
-    model: str | None = None
     language: str | None = None
     langCode: str | None = None
+    history: list[dict] | None = None
 
 
-class GeminiKeyRequest(BaseModel):
-    apiKey: str
-
-
-@router.get("/api/voice/config")
-async def get_voice_config():
-    """Return status of voice assistant engine and active configuration."""
-    active_key = os.environ.get("GEMINI_API_KEY") or GEMINI_API_KEY
-    if not active_key:
-        from dotenv import find_dotenv, load_dotenv
-        load_dotenv(find_dotenv(), override=True)
-        active_key = os.environ.get("GEMINI_API_KEY")
-
-    has_gemini = bool(active_key)
-    return {
-        "geminiConfigured": has_gemini,
-        "defaultModel": os.environ.get("GEMINI_VOICE_MODEL", "gemini-3.6-flash"),
-        "availableModels": ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-flash-latest", "gemini-3.8-flash"],
-        "fallbackEngine": "ollama",
-        "supportedLanguages": [
-            {"code": "en-IN", "name": "English", "native": "English"},
-            {"code": "ta-IN", "name": "Tamil", "native": "தமிழ்"},
-            {"code": "hi-IN", "name": "Hindi", "native": "हिन्दी"},
-            {"code": "te-IN", "name": "Telugu", "native": "తెలుగు"},
-            {"code": "ml-IN", "name": "Malayalam", "native": "മലയാളം"},
-            {"code": "kn-IN", "name": "Kannada", "native": "ಕನ್ನಡ"},
-        ],
-    }
-
-
-@router.post("/api/settings/gemini")
-async def save_gemini_key(body: GeminiKeyRequest):
-    """Save or update Gemini API key in runtime environment and .env file."""
-    key = body.apiKey.strip()
-    if not key:
-        raise HTTPException(status_code=400, detail="API key is required")
-
-    os.environ["GEMINI_API_KEY"] = key
-
-    # Persist to .env file in workspace root
-    env_path = os.path.join(os.path.dirname(__file__), "../../../.env")
-    try:
-        content = ""
-        if os.path.exists(env_path):
-            with open(env_path, "r", encoding="utf-8") as f:
-                content = f.read()
-
-        if re.search(r"^GEMINI_API_KEY=.*", content, re.MULTILINE):
-            new_content = re.sub(r"^GEMINI_API_KEY=.*", f"GEMINI_API_KEY={key}", content, flags=re.MULTILINE)
-        else:
-            new_content = content + f"\nGEMINI_API_KEY={key}\n"
-
-        with open(env_path, "w", encoding="utf-8") as f:
-            f.write(new_content)
-    except Exception:
-        pass  # In-memory update still works even if .env write fails
-
-    return {"status": "ok", "message": "Gemini API key saved successfully"}
+class VoiceRetrievalRequest(BaseModel):
+    query: str
+    chatId: str | None = None
 
 
 @router.post("/api/voice/chat")
 async def voice_chat(body: VoiceChatRequest):
-    """Process a voice conversation turn, fetch chat context if available, and persist messages."""
+    """
+    Text-in, spoken-text-out voice chat endpoint.
+    Uses local Ollama (llama3.2:3b) for LLM response.
+    The client handles TTS via /ws/voice/local WebSocket or browser.
+    """
     message = body.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message text is required")
 
-    history = []
-    if body.chatId:
+    # Fetch recent history from DB if chatId provided
+    history = list(body.history or [])
+    if body.chatId and not history:
         try:
-            # Check chat exists
             chat_check = await db.query(
                 "SELECT id FROM chats WHERE id = $1 AND user_id = $2",
                 [body.chatId, DEFAULT_USER_ID],
             )
             if chat_check["rowCount"] > 0:
-                # Fetch recent messages for conversational context
                 msg_res = await db.query(
                     "SELECT role, content FROM messages WHERE chat_id = $1 ORDER BY created_at DESC LIMIT 6",
                     [body.chatId],
@@ -104,17 +64,15 @@ async def voice_chat(body: VoiceChatRequest):
         except Exception:
             pass
 
-    # Call Gemini (or Ollama fallback)
-    result = await generate_voice_reply(
+    from ..voice.local_voice_service import generate_voice_reply_local
+    result = await generate_voice_reply_local(
         message=message,
-        api_key=body.apiKey,
-        model_name=body.model,
-        language=body.language,
-        lang_code=body.langCode,
+        chat_id=body.chatId,
         conversation_history=history,
+        language=body.language,
     )
 
-    # Persist to chat if chatId provided
+    # Persist to chat
     if body.chatId and result.get("success"):
         try:
             await db.query(
@@ -133,3 +91,46 @@ async def voice_chat(body: VoiceChatRequest):
             pass
 
     return result
+
+
+@router.post("/api/voice/retrieval")
+async def voice_retrieval(body: VoiceRetrievalRequest):
+    """Retrieve grounded knowledge from Vector DB for voice tool calls."""
+    try:
+        from ..retrieval.retrieval_service import retrieve
+        from datetime import datetime
+        result = await retrieve(
+            query=body.query,
+            chat_id=body.chatId or "",
+            top_k=4,
+        )
+        context_text = result.get("contextText", "")
+        sources = result.get("sources", [])
+        current_date = datetime.now().strftime("%A, %B %d, %Y")
+
+        if context_text:
+            result_text = f"Knowledge as of {current_date}:\n{context_text[:600]}"
+        else:
+            result_text = f"No specific knowledge found for '{body.query}'."
+
+        return {"result": result_text, "sources": sources}
+    except Exception as e:
+        logger.warn(f"Voice retrieval error: {e}")
+        return {"result": f"Could not retrieve knowledge: {e}", "sources": []}
+
+
+@router.get("/api/voice/config")
+async def get_voice_config():
+    """Return local voice engine capabilities."""
+    return {
+        "engine": "local",
+        "stt": "faster-whisper",
+        "tts": "pyttsx3+espeak-ng",
+        "llm": "ollama/llama3.2:3b",
+        "wsEndpoint": "/ws/voice/local",
+        "supportedLanguages": [
+            {"code": "en-IN", "name": "English", "native": "English"},
+        ],
+        "geminiConfigured": False,
+        "fallbackEngine": "ollama",
+    }

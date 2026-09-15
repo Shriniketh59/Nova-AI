@@ -21,13 +21,14 @@ async def test_voice_config_endpoint():
         res = await client.get("/api/voice/config")
         assert res.status_code == 200
         data = res.json()
-        assert "geminiConfigured" in data
-        assert "defaultModel" in data
-        assert "availableModels" in data
+        assert data["engine"] == "local"
+        assert data["stt"] == "faster-whisper"
+        assert data["geminiConfigured"] is False
+        assert "wsEndpoint" in data
 
 
 @pytest.mark.asyncio
-async def test_voice_chat_endpoint_fallback():
+async def test_voice_chat_endpoint():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://localhost:5001") as client:
         res = await client.post("/api/voice/chat", json={"message": "hello Nova voice"})
@@ -39,24 +40,13 @@ async def test_voice_chat_endpoint_fallback():
 
 
 @pytest.mark.asyncio
-async def test_save_gemini_key():
-    import os
-    env_path = os.path.join(os.path.dirname(__file__), "../../.env")
-    orig_env_content = None
-    orig_env_var = os.environ.get("GEMINI_API_KEY")
-    if os.path.exists(env_path):
-        with open(env_path, "r", encoding="utf-8") as f:
-            orig_env_content = f.read()
-
-    try:
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://localhost:5001") as client:
-            res = await client.post("/api/settings/gemini", json={"apiKey": "test_temp_key_verify"})
-            assert res.status_code == 200
-            assert res.json()["status"] == "ok"
-    finally:
-        if orig_env_var is not None:
-            os.environ["GEMINI_API_KEY"] = orig_env_var
-        if orig_env_content is not None and os.path.exists(env_path):
-            with open(env_path, "w", encoding="utf-8") as f:
-                f.write(orig_env_content)
+async def test_voice_retrieval_endpoint():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://localhost:5001") as client:
+        res = await client.post("/api/voice/retrieval", json={"query": "tallest player in NBA history"})
+        assert res.status_code == 200
+        data = res.json()
+        assert "result" in data
+        assert isinstance(data["result"], str)
+        assert len(data["result"]) > 0
+        assert "sources" in data
