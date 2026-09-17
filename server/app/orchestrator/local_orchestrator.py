@@ -26,6 +26,8 @@ from ..core.config import (
     OLLAMA_MODEL,
     OLLAMA_CODE_MODEL,
     MAX_CONTINUATIONS,
+    MAX_OUTPUT_TOKENS,
+    DEFAULT_USER_ID,
 )
 from ..core.logger import logger
 from .intent_router import classify_intent, needs_web_search, needs_vector_retrieval, is_coding_question
@@ -34,24 +36,29 @@ from .intent_router import classify_intent, needs_web_search, needs_vector_retri
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_TOKENS = int(2048)
+MAX_TOKENS = int(MAX_OUTPUT_TOKENS)
 NUM_THREADS = None  # let Ollama decide based on CPU
 RETRIEVAL_CHAR_LIMIT = 4000  # max chars of retrieved context passed to Llama
 WEB_SNIPPET_LIMIT = 3        # max web results to include
 
 SYSTEM_PROMPT = (
-    "You are Nova AI, a helpful, accurate, and concise assistant running fully locally. "
-    "Answer directly and factually. If context is provided, use it. "
-    "For code questions, produce complete, runnable code. "
-    "Never mention your knowledge cutoff or training limitations. "
+    "You are Nova AI, an expert, thoughtful, and highly accurate assistant running fully locally. "
+    "Answer the CURRENT USER QUERY with clarity, depth, and precision, using rich markdown formatting: "
+    "bold key terms, clean bullet points, numbered lists, and structured headings for detailed topics. "
+    "Interpret user queries charitably: automatically resolve typos, phonetic errors, spelling mistakes, "
+    "and grammatical slips without pedantically pointing them out, and answer accurately based on the intended meaning. "
+    "If context, web evidence, or user preferences are provided, ground your answer directly in them. "
+    "For code questions, produce complete, runnable code with clear comments and no missing pieces. "
+    "Never mention your knowledge cutoff, training limitations, or internal system boundaries. "
     "Today's date: {date}."
 )
 
 VOICE_SYSTEM_PROMPT = (
-    "You are Nova Voice, a fast conversational voice assistant. "
-    "Speak naturally in 1-3 short sentences. No markdown, no bullet points, "
+    "You are Nova Voice, a fast, expressive, and clear conversational voice assistant. "
+    "Speak naturally in 1-3 short, clear sentences. No markdown, no bullet points, "
     "no asterisks, no code blocks — your response will be spoken aloud. "
-    "Be direct, warm, and conversational. Today's date: {date}."
+    "Be direct, warm, and conversational. Automatically understand any misspoken words or typos. "
+    "Today's date: {date}."
 )
 
 # Regex to detect and strip training-cutoff disclaimers
@@ -85,29 +92,68 @@ def _clean_voice_text(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def _extract_domain(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or url
+        return host[4:] if host.startswith("www.") else host
+    except Exception:
+        return "web"
+
+
 # ---------------------------------------------------------------------------
-# Web retrieval (DDGS — no API key)
+# Web retrieval (DDGS — multiple independent clean sources, no API key)
 # ---------------------------------------------------------------------------
 
-async def _web_search(query: str, max_results: int = WEB_SNIPPET_LIMIT) -> list[dict]:
-    """DDGS web search — runs in thread pool to avoid blocking the event loop."""
+async def _web_search(query: str, max_results: int = 5) -> list[dict]:
+    """DDGS web search — retrieves MULTIPLE independent, clean sources without blocking."""
     loop = asyncio.get_running_loop()
 
     def _blocking():
         try:
             from ddgs import DDGS
             with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=max_results + 2))
-            return [
-                {
-                    "title": r.get("title", ""),
-                    "url": r.get("href", ""),
-                    "snippet": (r.get("body", "") or "")[:300],
-                }
-                for r in results
-            ][:max_results]
+                raw = list(ddgs.text(query, max_results=max_results * 2))
+
+            cleaned_sources = []
+            seen_urls = set()
+            domain_counts = {}
+
+            for r in raw:
+                url = (r.get("href") or r.get("url") or "").strip()
+                title = (r.get("title") or "").strip()
+                body = (r.get("body") or r.get("snippet") or "").strip()
+
+                if not url or not title or not body or len(body) < 25:
+                    continue
+
+                norm_url = url.split("#")[0].rstrip("/")
+                if norm_url in seen_urls:
+                    continue
+
+                domain = _extract_domain(url)
+                # Cap max 2 results per domain to ensure source diversity
+                if domain_counts.get(domain, 0) >= 2:
+                    continue
+
+                seen_urls.add(norm_url)
+                domain_counts[domain] = domain_counts.get(domain, 0) + 1
+
+                cleaned_sources.append({
+                    "title": title,
+                    "website": domain,
+                    "domain": domain,
+                    "url": url,
+                    "snippet": body[:350],
+                    "type": "web",
+                })
+
+                if len(cleaned_sources) >= max_results:
+                    break
+
+            return cleaned_sources
         except Exception as e:
-            logger.warn("orchestrator.web_search_failed", {"error": str(e)})
+            logger.warn("orchestrator.web_search_failed", {"error": str(e), "query": query[:40]})
             return []
 
     try:
@@ -138,42 +184,88 @@ async def _vector_retrieve(query: str, chat_id: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Prompt builder
+# Prompt builder (Requirement 14 Structure)
 # ---------------------------------------------------------------------------
 
 def _build_messages(
     query: str,
     context_text: str = "",
     web_sources: Optional[list[dict]] = None,
-    conversation_history: Optional[list[dict]] = None,
+    conversation_context: Optional[str] = None,
+    user_memories: Optional[list[str]] = None,
     is_voice: bool = False,
 ) -> list[dict]:
     date = _today()
-    sys_tmpl = VOICE_SYSTEM_PROMPT if is_voice else SYSTEM_PROMPT
-    system = sys_tmpl.format(date=date)
+    if is_voice:
+        system = (
+            f"You are Nova Voice, a fast, expressive, and clear conversational voice assistant. "
+            f"Speak naturally in 1-3 short sentences. No markdown, no bullet points, "
+            f"no asterisks, no code blocks — your response will be spoken aloud. "
+            f"Be direct, warm, and conversational. Today's date: {date}."
+        )
+    else:
+        system = (
+            f"You are Nova AI, an expert, thoughtful, and highly accurate assistant running fully locally. "
+            f"Answer the CURRENT USER QUERY with clarity, depth, and precision, using rich markdown formatting: "
+            f"bold key terms, clean bullet points, numbered lists, and structured headings for detailed topics. "
+            f"Interpret user queries charitably: automatically resolve typos, phonetic errors, spelling mistakes, "
+            f"and grammatical slips without pedantically pointing them out, and answer accurately based on the intended meaning. "
+            f"If context, web evidence, or user preferences are provided, ground your answer directly in them. "
+            f"Focus strictly on the question asked. Do NOT introduce unrelated topics or past discussions. "
+            f"For code questions, produce complete, runnable code with clear comments and no missing pieces. "
+            f"Never mention your knowledge cutoff, training limitations, or internal system boundaries. "
+            f"Today's date: {date}."
+        )
 
     messages: list[dict] = [{"role": "system", "content": system}]
 
-    # Add conversation history (last 6 turns)
-    if conversation_history:
-        for turn in conversation_history[-6:]:
-            role = turn.get("role", "user")
-            content = turn.get("content", "")
-            if role in ("user", "assistant") and content:
-                messages.append({"role": role, "content": content})
+    # Requirement 14 Prompt Structure:
+    # SYSTEM INSTRUCTIONS
+    # CURRENT USER QUERY
+    # RELEVANT CONVERSATION CONTEXT (only if needed)
+    # USER MEMORY & PREFERENCES (only if present)
+    # VECTOR DB CONTEXT (only if relevant)
+    # CURRENT WEB SOURCES (only if relevant)
+    prompt_blocks = [f"CURRENT USER QUERY:\n{query}"]
 
-    # Build user message with optional context
-    parts = []
-    if context_text:
-        parts.append(f"[Retrieved Context]\n{context_text[:RETRIEVAL_CHAR_LIMIT]}")
-    if web_sources:
-        lines = "\n".join(
-            f"- {s['title']}: {s['snippet'][:250]}" for s in web_sources[:WEB_SNIPPET_LIMIT]
+    if conversation_context and conversation_context.strip():
+        prompt_blocks.append(
+            f"[RELEVANT CONVERSATION CONTEXT]\n{conversation_context.strip()}"
         )
-        parts.append(f"[Live Web Evidence]\n{lines}\nAnswer using this evidence. Be concise and direct.")
-    parts.append(f"Question: {query}")
 
-    messages.append({"role": "user", "content": "\n\n".join(parts)})
+    if user_memories:
+        valid_mems = [m.strip() for m in user_memories if m and m.strip()]
+        if valid_mems:
+            mem_text = "\n".join(f"- {m}" for m in valid_mems)
+            prompt_blocks.append(
+                f"[USER MEMORY & PREFERENCES]\n{mem_text}\n\n"
+                f"Instruction: Tailor your response to respect the user's stated preferences and facts above."
+            )
+
+    if context_text and context_text.strip():
+        prompt_blocks.append(
+            f"[VECTOR DB CONTEXT]\n{context_text.strip()[:RETRIEVAL_CHAR_LIMIT]}"
+        )
+
+    if web_sources:
+        source_lines = []
+        for i, s in enumerate(web_sources, 1):
+            domain_label = f" ({s['website']})" if s.get('website') else ""
+            source_lines.append(
+                f"[Source {i}] {s.get('title', '')}{domain_label}\n"
+                f"URL: {s.get('url', '')}\n"
+                f"Content: {s.get('snippet', '')}"
+            )
+        web_evidence_text = "\n\n".join(source_lines)
+        prompt_blocks.append(
+            f"[CURRENT WEB SOURCES]\n{web_evidence_text}\n\n"
+            f"Instruction: Ground your answer to the CURRENT USER QUERY in the relevant evidence above. "
+            f"Do not include unrelated topics."
+        )
+
+    user_message_content = "\n\n".join(prompt_blocks)
+    messages.append({"role": "user", "content": user_message_content})
+
     return messages
 
 
@@ -234,6 +326,7 @@ async def orchestrate_stream(
     chat_id: str = "",
     conversation_history: Optional[list[dict]] = None,
     is_voice: bool = False,
+    user_id: str = DEFAULT_USER_ID,
 ) -> AsyncIterator[dict]:
     """
     Main orchestration pipeline. Yields dicts:
@@ -246,13 +339,31 @@ async def orchestrate_stream(
     t0 = time.perf_counter()
 
     try:
+        # Check daily token budget
+        from ..services.token_budget_service import token_budget_service
+        allowed, budget_msg = await token_budget_service.check_allowance(user_id, estimated_tokens=30)
+        if not allowed:
+            yield {"sources": []}
+            yield {"token": f"⚠️ {budget_msg}"}
+            yield {"done": True}
+            return
+
         # 1. Check what knowledge is available
+        has_files = False
+        if chat_id:
+            try:
+                from ..rag import fetch_chunks_for_chat
+                chat_chunks = await fetch_chunks_for_chat(chat_id)
+                has_files = len(chat_chunks) > 0
+            except Exception:
+                has_files = False
+
         from ..knowledge.refresh_pipeline import refresh_manager
         kb_chunks = refresh_manager.list_all_chunks()
         has_kb_docs = bool(kb_chunks)
 
-        # 2. Classify intent
-        intent = classify_intent(query, has_files=bool(chat_id), has_kb_docs=has_kb_docs)
+        # 2. Classify intent (with query regularizer)
+        intent = classify_intent(query, has_files=has_files, has_kb_docs=has_kb_docs)
         logger.info("orchestrator.intent", {"intent": intent, "chatId": chat_id, "query_prefix": query[:40]})
 
         # 3. Greeting — fast path, no retrieval
@@ -289,36 +400,70 @@ async def orchestrate_stream(
             yield {"done": True}
             return
 
-        # 5. Retrieve context — live web search for all prompts
-        context_text = ""
-        web_sources = await _web_search(query)
-        if web_sources:
-            yield {"sources": web_sources}
-        else:
-            yield {"sources": []}
+        # 5. Follow-up evaluation: isolate unrelated queries
+        from .context_filter import detect_follow_up
+        is_follow_up, conversation_context, meta = detect_follow_up(query, conversation_history)
+        logger.info("orchestrator.follow_up", {
+            "chatId": chat_id,
+            "is_follow_up": is_follow_up,
+            "reason": meta.get("reason"),
+            "query_prefix": query[:40],
+        })
 
-        if needs_vector_retrieval(intent):
-            context_text = await _vector_retrieve(query, chat_id)
+        # 6. Retrieve context concurrently for maximum generation speed (low TTFT)
+        from ..agents.memory_agent import memory_agent
 
-        # 6. Build prompt and stream response
+        async def _fetch_memories():
+            try:
+                return await memory_agent.get_relevant_memories(chat_id, query, top_k=3, user_id=user_id)
+            except Exception:
+                return []
+
+        async def _fetch_web():
+            if needs_web_search(intent):
+                return await _web_search(query, max_results=5)
+            return []
+
+        async def _fetch_vector():
+            if needs_vector_retrieval(intent, has_files=has_files, has_kb_docs=has_kb_docs):
+                return await _vector_retrieve(query, chat_id)
+            return ""
+
+        user_memories, web_sources, context_text = await asyncio.gather(
+            _fetch_memories(),
+            _fetch_web(),
+            _fetch_vector(),
+        )
+
+        yield {"sources": web_sources if web_sources else []}
+
+        # 7. Build prompt strictly according to Requirement 14 and stream response
         messages = _build_messages(
             query=query,
             context_text=context_text,
             web_sources=web_sources if web_sources else None,
-            conversation_history=conversation_history,
+            conversation_context=conversation_context if is_follow_up else None,
+            user_memories=user_memories if user_memories else None,
             is_voice=is_voice,
         )
 
         full_text = ""
-        async for token in _stream_ollama(messages):
+        prompt_tokens = token_budget_service.estimate_tokens(str(messages))
+        completion_tokens = 0
+
+        async for token in _stream_ollama(messages, max_tokens=MAX_TOKENS):
             full_text += token
+            completion_tokens += max(1, len(token) // 4)
             yield {"token": token}
 
-        # 7. Post-process: strip training-cutoff disclaimers
+        # 8. Post-process: strip training-cutoff disclaimers
         if CUTOFF_RE.search(full_text):
             cleaned = _strip_cutoff_sentences(full_text)
             if cleaned and cleaned != full_text:
                 yield {"replace": cleaned}
+
+        # Record daily token usage asynchronously
+        asyncio.create_task(token_budget_service.record_usage(user_id, prompt_tokens, completion_tokens))
 
         elapsed_ms = round((time.perf_counter() - t0) * 1000)
         logger.info("orchestrator.complete", {
@@ -326,6 +471,8 @@ async def orchestrate_stream(
             "elapsed_ms": elapsed_ms,
             "web_sources": len(web_sources),
             "context_chars": len(context_text),
+            "memories_count": len(user_memories),
+            "completion_tokens": completion_tokens,
         })
         yield {"done": True}
 
@@ -340,6 +487,7 @@ async def orchestrate_full(
     chat_id: str = "",
     conversation_history: Optional[list[dict]] = None,
     is_voice: bool = False,
+    user_id: str = DEFAULT_USER_ID,
 ) -> dict:
     """
     Non-streaming version — collects full response for voice reply.
@@ -347,7 +495,13 @@ async def orchestrate_full(
     """
     text_parts = []
     sources = []
-    async for event in orchestrate_stream(query, chat_id, conversation_history, is_voice=is_voice):
+    async for event in orchestrate_stream(
+        query=query,
+        chat_id=chat_id,
+        conversation_history=conversation_history,
+        is_voice=is_voice,
+        user_id=user_id,
+    ):
         if "sources" in event:
             sources = event["sources"]
         elif "token" in event:

@@ -15,11 +15,12 @@ async def hybrid_search(
     query_vector: Optional[list[float]] = None,
     filters: Optional[dict] = None,
     include_web: bool = False,
+    user_id: Optional[str] = None,
 ) -> list[dict]:
     """Parallel hybrid retrieval executing Dense Semantic Search, Sparse BM25 Search,
     and Fresh Web Retrieval concurrently with Reciprocal Rank Fusion (RRF)."""
     tasks = [
-        semantic_search(query, chat_id, top_k * 2, query_vector=query_vector, filters=filters),
+        semantic_search(query, chat_id, top_k * 2, query_vector=query_vector, filters=filters, user_id=user_id),
         keyword_search(query, chat_id, top_k * 2, filters=filters),
     ]
 

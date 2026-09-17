@@ -34,9 +34,11 @@ def _apply_metadata_filter(chunks: list[dict], filters: dict | None) -> list[dic
 
 
 def bm25_score_chunks(query_terms: list[str], chunks: list[dict], k1: float = 1.5, b: float = 0.75) -> list[dict]:
-    """Computes Okapi BM25 score for each chunk across the corpus."""
+    """Computes Okapi BM25 score for each chunk across the corpus with spelling tolerance."""
     if not query_terms or not chunks:
         return []
+
+    from ..utils.query_regularizer import levenshtein_distance
 
     # 1. Tokenize corpus chunks
     tokenized_corpus = []
@@ -51,6 +53,10 @@ def bm25_score_chunks(query_terms: list[str], chunks: list[dict], k1: float = 1.
         for qt in query_terms:
             if qt in term_set:
                 doc_freqs[qt] += 1
+            elif len(qt) >= 4:
+                # Fuzzy match for spelling tolerance
+                if any(abs(len(qt) - len(ct)) <= 1 and levenshtein_distance(qt, ct) <= 1 for ct in term_set if len(ct) >= 4):
+                    doc_freqs[qt] += 1
 
     n_docs = len(chunks)
     avgdl = total_len / max(1, n_docs)
@@ -59,7 +65,6 @@ def bm25_score_chunks(query_terms: list[str], chunks: list[dict], k1: float = 1.
     idf: dict[str, float] = {}
     for qt in query_terms:
         df = doc_freqs.get(qt, 0)
-        # Standard BM25 IDF formula with smoothing
         idf[qt] = max(0.1, math.log((n_docs - df + 0.5) / (df + 0.5) + 1.0))
 
     # 3. Score each chunk
@@ -70,20 +75,25 @@ def bm25_score_chunks(query_terms: list[str], chunks: list[dict], k1: float = 1.
         if dl == 0:
             continue
 
-        term_counts: dict[str, int] = {}
+        term_counts: dict[str, float] = {}
         for t in terms:
             term_counts[t] = term_counts.get(t, 0) + 1
 
         bm25_val = 0.0
         for qt in query_terms:
             tf = term_counts.get(qt, 0)
+            if tf == 0 and len(qt) >= 4:
+                # Check for near matches
+                for t, count in term_counts.items():
+                    if len(t) >= 4 and abs(len(qt) - len(t)) <= 1 and levenshtein_distance(qt, t) <= 1:
+                        tf += count * 0.85
+
             if tf > 0:
                 numerator = tf * (k1 + 1.0)
                 denominator = tf + k1 * (1.0 - b + b * (dl / avgdl))
                 bm25_val += idf[qt] * (numerator / denominator)
 
         if bm25_val > 0:
-            # Normalize BM25 score to [0, 1] range for composite scoring
             norm_score = round(min(1.0, bm25_val / (len(query_terms) * 4.0)), 4)
             scored.append({
                 **chunk,
@@ -102,7 +112,11 @@ async def keyword_search(
     filters: Optional[dict] = None,
     candidate_chunks: Optional[List[dict]] = None,
 ) -> list[dict]:
-    query_terms = list({t for t in _tokenize(query) if t not in STOPWORDS and len(t) > 1})
+    from ..utils.query_regularizer import regularize_query
+    reg = regularize_query(query)
+    raw_terms = {t for t in _tokenize(query) if t not in STOPWORDS and len(t) > 1}
+    normalized_terms = {t for t in reg.get("normalized_tokens", []) if t not in STOPWORDS and len(t) > 1}
+    query_terms = list(raw_terms | normalized_terms)
     if not query_terms:
         return []
 

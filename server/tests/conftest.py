@@ -26,8 +26,17 @@ async def app_client():
     from app.main import app
 
     await db_module.init_db()
+    from app.services.auth_service import create_access_token
+    from app.core.config import DEFAULT_USER_ID, AUTH_COOKIE_NAME
+    token = create_access_token(DEFAULT_USER_ID, "dr.john.doe@nova.ai")
+
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {token}"},
+        cookies={AUTH_COOKIE_NAME: token},
+    ) as client:
         yield client
     await db_module.close_db()
 

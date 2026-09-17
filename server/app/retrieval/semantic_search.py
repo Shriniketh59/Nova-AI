@@ -12,6 +12,7 @@ async def in_memory_cosine_search(
     chat_id: str = "",
     top_k: int = 10,
     filters: Optional[dict] = None,
+    user_id: Optional[str] = None,
 ) -> list[dict]:
     chunks = await fetch_chunks_for_chat(chat_id) if chat_id else []
     if not chunks:
@@ -22,6 +23,12 @@ async def in_memory_cosine_search(
 
     scored = []
     for c in chunks:
+        # Multi-tenancy check: only allow caller's own documents or global public knowledge
+        chunk_uid = c.get("user_id")
+        chunk_scope = c.get("scope", "global" if not chunk_uid else "user")
+        if user_id and chunk_uid and chunk_uid != user_id and chunk_scope != "global":
+            continue
+
         # Apply metadata filters if provided
         if filters:
             match = True
@@ -48,14 +55,15 @@ async def semantic_search(
     top_k: int = 10,
     query_vector: Optional[list[float]] = None,
     filters: Optional[dict] = None,
+    user_id: Optional[str] = None,
 ) -> list[dict]:
     """Dense semantic vector search across Qdrant with in-memory fallback.
     Supports pre-computed query vectors to avoid redundant Ollama embedding calls,
-    and metadata-aware payload filtering."""
+    metadata-aware payload filtering, and user isolation."""
     q_vec = query_vector if query_vector is not None else await generate_embedding(query)
 
     if not QDRANT_URL:
-        return await in_memory_cosine_search(q_vec, chat_id, top_k, filters)
+        return await in_memory_cosine_search(q_vec, chat_id, top_k, filters, user_id=user_id)
 
     try:
         qdrant_filter: dict = {"must": []}

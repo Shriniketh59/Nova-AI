@@ -26,8 +26,10 @@ OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "all-minilm:latest")
 OLLAMA_CODE_MODEL = os.environ.get("OLLAMA_CODE_MODEL", "qwen2.5-coder:1.5b")
 
 CODE_LLM_REVIEW = os.environ.get("CODE_LLM_REVIEW", "false").lower() == "true"
-CODE_NUM_PREDICT = _int("CODE_NUM_PREDICT", 2048)
+CODE_NUM_PREDICT = _int("CODE_NUM_PREDICT", 4096)
 MAX_CONTINUATIONS = _int("MAX_CONTINUATIONS", 3)
+MAX_OUTPUT_TOKENS = _int("MAX_OUTPUT_TOKENS", 4096)
+DAILY_TOKEN_LIMIT = _int("DAILY_TOKEN_LIMIT", 100000)
 
 
 RAG_TOP_K = _int("RAG_TOP_K", 8)
@@ -47,5 +49,16 @@ WEB_RETRIEVER_PROVIDER = os.environ.get("WEB_RETRIEVER_PROVIDER", "ddgs")
 VECTOR_STORE_BACKEND = os.environ.get("VECTOR_STORE_BACKEND", "qdrant").lower()
 
 DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000000"
+
+# Authentication & Session Settings
+JWT_SECRET = os.environ.get("JWT_SECRET", "nova-ai-jwt-super-secret-key-change-in-production-2026")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRES_DAYS = _int("JWT_EXPIRES_DAYS", 30)
+AUTH_COOKIE_NAME = "nova_session"
+
+# Google OAuth Settings
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:5001/api/auth/google/callback")
 
 NODE_ENV = os.environ.get("NODE_ENV", "development")

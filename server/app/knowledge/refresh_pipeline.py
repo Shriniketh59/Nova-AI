@@ -108,6 +108,8 @@ class DataRefreshManager:
         etag: str | None = None,
         last_modified: str | None = None,
         force_reindex: bool = False,
+        user_id: str | None = None,
+        **kwargs,
     ) -> dict:
         """Core Ingestion Pipeline:
         FETCH -> NORMALIZE -> CLEAN -> CONTENT HASH -> CHECK EXISTING

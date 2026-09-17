@@ -4,11 +4,12 @@ import os
 import time
 import uuid
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
 from ..core import db
-from ..core.config import DEFAULT_USER_ID, QDRANT_URL
+from ..core.config import QDRANT_URL
+from ..middleware.auth_middleware import get_current_user
 from ..rag import parse_document, chunk_with_pages, generate_embedding, search_relevant_chunks
 from ..retrieval.qdrant_client import upsert_points, COLLECTIONS
 
@@ -27,16 +28,17 @@ RAG_INDEXABLE_MIME_TYPES = {
 
 IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
 
-# Extension allowlist as a second line of defense alongside the MIME check —
-# content_type is client-supplied and can be spoofed, so we also cap what
-# extension a generated filename is allowed to carry on disk.
 ALLOWED_EXTENSIONS = {".pdf", ".txt", ".md", ".csv", ".docx", ".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 MAX_FILE_SIZE = 10 * 1024 * 1024
 
 
 @router.post("/api/upload", status_code=201)
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    user_id = current_user["id"]
     body = await file.read()
     if len(body) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="File too large (max 10MB)")
@@ -52,13 +54,6 @@ async def upload_file(file: UploadFile = File(...)):
             ),
         )
 
-    # Path-traversal / malicious-extension guard: derive the extension from
-    # only the basename of the client-supplied filename (strips any leading
-    # directory components like "../../etc/passwd") and reject anything
-    # outside the allowlist — the on-disk filename is otherwise fully
-    # server-generated (timestamp + uuid), so this only constrains the
-    # trailing extension, but it stops both directory traversal and
-    # "upload a .php/.sh with a spoofed content-type" attacks.
     safe_basename = os.path.basename((file.filename or "").replace("\\", "/"))
     ext = os.path.splitext(safe_basename)[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -78,7 +73,7 @@ async def upload_file(file: UploadFile = File(...)):
         existing = await db.query(
             """SELECT id, original_filename, mime_type, size_bytes FROM uploaded_files
                WHERE user_id = $1 AND file_hash = $2 AND ingest_status = 'indexed' LIMIT 1""",
-            [DEFAULT_USER_ID, file_hash],
+            [user_id, file_hash],
         )
         if existing["rows"]:
             os.remove(file_path)
@@ -92,7 +87,7 @@ async def upload_file(file: UploadFile = File(...)):
         file_result = await db.query(
             """INSERT INTO uploaded_files (message_id, user_id, filename, original_filename, mime_type, size_bytes, file_path, file_hash, ingest_status)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *""",
-            [None, DEFAULT_USER_ID, filename, file.filename, mimetype, len(body), file_path, file_hash, "indexed" if is_image else "processing"],
+            [None, user_id, filename, file.filename, mimetype, len(body), file_path, file_hash, "indexed" if is_image else "processing"],
         )
         file_record = file_result["rows"][0]
 
@@ -127,6 +122,8 @@ async def upload_file(file: UploadFile = File(...)):
                         "payload": {
                             "file_id": file_record["id"],
                             "document_id": file_record["id"],
+                            "user_id": user_id,
+                            "scope": "user",
                             "content": content,
                             "page_number": page_number,
                             "original_filename": file.filename,
@@ -148,6 +145,7 @@ async def upload_file(file: UploadFile = File(...)):
                 title=file.filename,
                 source_type="file",
                 category="document",
+                user_id=user_id,
             )
         except Exception:
             pass
@@ -161,11 +159,11 @@ async def upload_file(file: UploadFile = File(...)):
         }
     except Exception as err:
         try:
-            await db.query("UPDATE uploaded_files SET ingest_status = 'failed' WHERE file_hash = $1 AND user_id = $2", [file_hash, DEFAULT_USER_ID])
+            await db.query("UPDATE uploaded_files SET ingest_status = 'failed' WHERE file_hash = $1 AND user_id = $2", [file_hash, user_id])
             await db.query(
                 """UPDATE indexing_jobs SET status = 'failed', error = $1, updated_at = now()
                    WHERE file_id = (SELECT id FROM uploaded_files WHERE file_hash = $2 AND user_id = $3 LIMIT 1)""",
-                [str(err), file_hash, DEFAULT_USER_ID],
+                [str(err), file_hash, user_id],
             )
         except Exception:
             pass
@@ -180,9 +178,19 @@ class QueryContextBody(BaseModel):
 
 
 @router.post("/api/chats/{chat_id}/query-context")
-async def query_context(chat_id: str, body: QueryContextBody):
+async def query_context(
+    chat_id: str,
+    body: QueryContextBody,
+    current_user: dict = Depends(get_current_user),
+):
     if not body.query:
         raise HTTPException(status_code=400, detail="Query text is required")
+
+    user_id = current_user["id"]
+    chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [chat_id, user_id])
+    if chat_check["rowCount"] == 0:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
     try:
         top_k = body.limit or 3
         relevant_chunks = await search_relevant_chunks(body.query, chat_id, top_k)

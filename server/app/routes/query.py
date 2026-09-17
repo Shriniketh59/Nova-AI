@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -15,8 +15,8 @@ from ..agents.memory_agent import memory_agent
 from ..agents.resume_analysis_agent import ResumeAnalysisAgent
 from ..agents.vision_agent import VisionAgent
 from ..core import db
-from ..core.config import DEFAULT_USER_ID
 from ..core.logger import logger
+from ..middleware.auth_middleware import get_current_user
 from ..rag import fetch_chunks_for_chat, fetch_images_for_chat
 from ..orchestrator.local_orchestrator import orchestrate_stream
 from ..retrieval.complexity import tier_for
@@ -46,10 +46,19 @@ class ChatQueryBody(BaseModel):
 
 
 @router.post("/api/chats/{chat_id}/query")
-async def chat_query(chat_id: str, body: ChatQueryBody):
+async def chat_query(
+    chat_id: str,
+    body: ChatQueryBody,
+    current_user: dict = Depends(get_current_user),
+):
     query = body.query
     if not query:
         raise HTTPException(status_code=400, detail="Query text is required")
+
+    user_id = current_user["id"]
+    chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [chat_id, user_id])
+    if chat_check["rowCount"] == 0:
+        raise HTTPException(status_code=404, detail="Chat not found")
 
     async def stream():
         req_id = f"{chat_id}-{int(time.time() * 1000)}"
@@ -60,14 +69,14 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
             )
             user_msg = user_msg_result["rows"][0]
             try:
-                await memory_agent.extract_memory(DEFAULT_USER_ID, chat_id, query)
+                await memory_agent.extract_memory(user_id, chat_id, query)
             except Exception:
                 pass
 
             if body.fileId:
                 await db.query(
                     "UPDATE uploaded_files SET message_id = $1 WHERE id = $2 AND user_id = $3",
-                    [user_msg["id"], body.fileId, DEFAULT_USER_ID],
+                    [user_msg["id"], body.fileId, user_id],
                 )
 
             all_chat_chunks = await fetch_chunks_for_chat(chat_id)
@@ -165,12 +174,12 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
             accumulated_text = ""
             sources = []
 
-            # Build conversation context for orchestrator
+            # Build conversation context for orchestrator (excluding the message just inserted)
             conversation_history = []
             try:
                 ctx_rows = await db.query(
-                    "SELECT role, content FROM messages WHERE chat_id = $1 ORDER BY created_at DESC LIMIT 8",
-                    [chat_id],
+                    "SELECT role, content FROM messages WHERE chat_id = $1 AND id != $2 ORDER BY created_at DESC LIMIT 8",
+                    [chat_id, user_msg["id"]],
                 )
                 conversation_history = list(reversed(ctx_rows["rows"]))
             except Exception:
@@ -181,9 +190,10 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
                 chat_id=chat_id,
                 conversation_history=conversation_history,
                 is_voice=False,
+                user_id=user_id,
             ):
                 if data.get("sources"):
-                    sources = data["sources"][:3]
+                    sources = data["sources"]
                     yield _sse({"text": "", "sources": sources})
                 if data.get("token"):
                     accumulated_text += data["token"]
@@ -192,8 +202,8 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
                     accumulated_text = data["replace"]
                     yield _sse({"text": accumulated_text, "sources": sources})
 
-            web_source_cards = [{**s, "type": "web"} for s in sources][:3]
-            all_source_cards = web_source_cards[:3]
+            web_source_cards = [{**s, "type": "web"} for s in sources]
+            all_source_cards = web_source_cards
 
             doc_type = detect_document_request(query)
             document = None
@@ -231,9 +241,14 @@ class ChatRagBody(BaseModel):
 
 
 @router.post("/api/chat/rag")
-async def chat_rag(body: ChatRagBody):
+async def chat_rag(body: ChatRagBody, current_user: dict = Depends(get_current_user)):
     if not body.chatId or not body.message:
         raise HTTPException(status_code=400, detail="chatId and message are required")
+
+    user_id = current_user["id"]
+    chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [body.chatId, user_id])
+    if chat_check["rowCount"] == 0:
+        raise HTTPException(status_code=404, detail="Chat not found")
 
     try:
         await db.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)", [body.chatId, "user", body.message])

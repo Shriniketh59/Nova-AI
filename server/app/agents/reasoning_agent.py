@@ -21,7 +21,9 @@ def _build_reasoning_prompt(question: str, plan: dict, evidence_summary: str, co
     )
 
     memory_note = (
-        "\nRelevant context from earlier in this conversation:\n" + "\n".join(memories) + "\n"
+        "\n[RELEVANT CONVERSATION CONTEXT (Follow-up to previous turn)]\n"
+        + "\n".join(memories)
+        + "\nNote: Context from earlier in this conversation is solely for resolving references in follow-up questions. Answer ONLY the current question.\n"
         if memories else ""
     )
 

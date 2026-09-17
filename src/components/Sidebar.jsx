@@ -1,10 +1,29 @@
 import { useState, useEffect } from 'react';
 import { NavLink, useNavigate, useParams } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 
 export default function Sidebar({ onLogout }) {
+  const { user, logout } = useAuth();
   const [chatHistory, setChatHistory] = useState([]);
   const { chatId: activeChatId } = useParams();
   const navigate = useNavigate();
+
+  const handleLogout = async () => {
+    if (onLogout) {
+      await onLogout();
+    } else {
+      await logout();
+      navigate('/login');
+    }
+  };
+
+  const displayName = user?.name || (user?.email ? user.email.split('@')[0] : 'User');
+  const initials = displayName
+    .split(' ')
+    .map((p) => p[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase() || 'U';
 
   const fetchChats = async () => {
     try {
@@ -116,16 +135,35 @@ export default function Sidebar({ onLogout }) {
           <span>Settings</span>
         </NavLink>
 
-        <div className="flex items-center space-x-3 px-3 py-2 mt-1 rounded-lg hover:bg-white/5 cursor-pointer transition-colors" onClick={onLogout}>
-          <div className="w-7 h-7 rounded-full bg-zinc-800 border border-white/10 flex items-center justify-center text-[10px] font-semibold text-white">
-            JD
-          </div>
+        <div
+          className="flex items-center space-x-3 px-3 py-2 mt-1 rounded-lg hover:bg-white/5 cursor-pointer transition-colors group"
+          onClick={handleLogout}
+          title="Sign out"
+        >
+          {user?.profile_image ? (
+            <img src={user.profile_image} alt={displayName} className="w-7 h-7 rounded-full object-cover border border-white/10" />
+          ) : (
+            <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-violet-600 to-fuchsia-600 border border-white/10 flex items-center justify-center text-[10px] font-bold text-white shadow-sm">
+              {initials}
+            </div>
+          )}
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-white truncate">Dr. John Doe</p>
+            <p className="text-sm font-medium text-white truncate">{displayName}</p>
+            <p className="text-[10px] text-zinc-500 truncate">{user?.email || ''}</p>
           </div>
-          <svg className="w-4 h-4 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-          </svg>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              handleLogout();
+            }}
+            className="text-zinc-500 group-hover:text-rose-400 transition-colors p-1"
+            title="Sign out"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+            </svg>
+          </button>
         </div>
       </div>
     </aside>

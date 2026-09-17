@@ -1,8 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..core import db
-from ..core.config import DEFAULT_USER_ID
+from ..middleware.auth_middleware import get_current_user
 
 router = APIRouter()
 
@@ -22,25 +22,28 @@ class CreateMessageBody(BaseModel):
 
 
 @router.get("/api/chats")
-async def list_chats():
-    result = await db.query("SELECT * FROM chats WHERE user_id = $1 ORDER BY updated_at DESC", [DEFAULT_USER_ID])
+async def list_chats(current_user: dict = Depends(get_current_user)):
+    user_id = current_user["id"]
+    result = await db.query("SELECT * FROM chats WHERE user_id = $1 ORDER BY updated_at DESC", [user_id])
     return result["rows"]
 
 
 @router.post("/api/chats", status_code=201)
-async def create_chat(body: CreateChatBody):
+async def create_chat(body: CreateChatBody, current_user: dict = Depends(get_current_user)):
+    user_id = current_user["id"]
     result = await db.query(
         "INSERT INTO chats (user_id, title) VALUES ($1, $2) RETURNING *",
-        [DEFAULT_USER_ID, body.title or "New Chat"],
+        [user_id, body.title or "New Chat"],
     )
     return result["rows"][0]
 
 
 @router.put("/api/chats/{chat_id}")
-async def rename_chat(chat_id: str, body: RenameChatBody):
+async def rename_chat(chat_id: str, body: RenameChatBody, current_user: dict = Depends(get_current_user)):
+    user_id = current_user["id"]
     result = await db.query(
         "UPDATE chats SET title = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND user_id = $3 RETURNING *",
-        [body.title, chat_id, DEFAULT_USER_ID],
+        [body.title, chat_id, user_id],
     )
     if result["rowCount"] == 0:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -48,10 +51,11 @@ async def rename_chat(chat_id: str, body: RenameChatBody):
 
 
 @router.delete("/api/chats/{chat_id}")
-async def delete_chat(chat_id: str):
+async def delete_chat(chat_id: str, current_user: dict = Depends(get_current_user)):
+    user_id = current_user["id"]
     result = await db.query(
         "DELETE FROM chats WHERE id = $1 AND user_id = $2 RETURNING *",
-        [chat_id, DEFAULT_USER_ID],
+        [chat_id, user_id],
     )
     if result["rowCount"] == 0:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -59,8 +63,9 @@ async def delete_chat(chat_id: str):
 
 
 @router.get("/api/chats/{chat_id}/messages")
-async def get_messages(chat_id: str):
-    chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [chat_id, DEFAULT_USER_ID])
+async def get_messages(chat_id: str, current_user: dict = Depends(get_current_user)):
+    user_id = current_user["id"]
+    chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [chat_id, user_id])
     if chat_check["rowCount"] == 0:
         raise HTTPException(status_code=404, detail="Chat not found")
 
@@ -89,11 +94,12 @@ async def get_messages(chat_id: str):
 
 
 @router.post("/api/chats/{chat_id}/messages", status_code=201)
-async def save_message(chat_id: str, body: CreateMessageBody):
+async def save_message(chat_id: str, body: CreateMessageBody, current_user: dict = Depends(get_current_user)):
     if not body.role or not body.content:
         raise HTTPException(status_code=400, detail="Role and content are required")
 
-    chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [chat_id, DEFAULT_USER_ID])
+    user_id = current_user["id"]
+    chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [chat_id, user_id])
     if chat_check["rowCount"] == 0:
         raise HTTPException(status_code=404, detail="Chat not found")
 
@@ -106,7 +112,7 @@ async def save_message(chat_id: str, body: CreateMessageBody):
     if body.fileId:
         await db.query(
             "UPDATE uploaded_files SET message_id = $1 WHERE id = $2 AND user_id = $3",
-            [message["id"], body.fileId, DEFAULT_USER_ID],
+            [message["id"], body.fileId, user_id],
         )
 
     await db.query("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [chat_id])
@@ -115,7 +121,12 @@ async def save_message(chat_id: str, body: CreateMessageBody):
 
 
 @router.get("/api/chats/{chat_id}/files")
-async def get_chat_files(chat_id: str):
+async def get_chat_files(chat_id: str, current_user: dict = Depends(get_current_user)):
+    user_id = current_user["id"]
+    chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [chat_id, user_id])
+    if chat_check["rowCount"] == 0:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
     files = await db.query(
         """SELECT id, original_filename as name, mime_type as type, size_bytes as size, created_at
            FROM uploaded_files

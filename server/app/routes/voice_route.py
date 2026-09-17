@@ -13,12 +13,14 @@ Removed:
 """
 import re
 
-from fastapi import APIRouter, HTTPException
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..core import db
 from ..core.config import DEFAULT_USER_ID
 from ..core.logger import logger
+from ..middleware.auth_middleware import get_optional_user
 
 router = APIRouter()
 
@@ -37,7 +39,7 @@ class VoiceRetrievalRequest(BaseModel):
 
 
 @router.post("/api/voice/chat")
-async def voice_chat(body: VoiceChatRequest):
+async def voice_chat(body: VoiceChatRequest, current_user: Optional[dict] = Depends(get_optional_user)):
     """
     Text-in, spoken-text-out voice chat endpoint.
     Uses local Ollama (llama3.2:3b) for LLM response.
@@ -47,13 +49,15 @@ async def voice_chat(body: VoiceChatRequest):
     if not message:
         raise HTTPException(status_code=400, detail="Message text is required")
 
+    user_id = current_user["id"] if current_user else DEFAULT_USER_ID
+
     # Fetch recent history from DB if chatId provided
     history = list(body.history or [])
     if body.chatId and not history:
         try:
             chat_check = await db.query(
                 "SELECT id FROM chats WHERE id = $1 AND user_id = $2",
-                [body.chatId, DEFAULT_USER_ID],
+                [body.chatId, user_id],
             )
             if chat_check["rowCount"] > 0:
                 msg_res = await db.query(

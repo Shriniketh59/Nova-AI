@@ -25,9 +25,16 @@ def _read_json_db() -> dict:
                 {
                     "id": DEFAULT_USER_ID,
                     "email": "dr.john.doe@nova.ai",
-                    "password_hash": "hashedpassword",
+                    "name": "Dr. John Doe",
+                    "password_hash": "scrypt:16384:8:1$X//NOsyAubmKAEo4fv6EBg==$MOl4hFjHbGOSDyc3lb+OtLIjmi1qiDrfnIHECNGr4q0=",
+                    "profile_image": None,
+                    "auth_provider": "local",
+                    "provider_user_id": None,
                     "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "last_login": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "reset_token": None,
+                    "reset_token_expires_at": None,
                 }
             ],
             "chats": [],
@@ -39,6 +46,7 @@ def _read_json_db() -> dict:
             "practice_problems": [],
             "interview_sessions": [],
             "session_submissions": [],
+            "user_daily_token_usage": [],
         }
         with open(_JSON_DB_PATH, "w", encoding="utf-8") as f:
             json.dump(initial, f, indent=2)
@@ -59,6 +67,7 @@ def _read_json_db() -> dict:
             "practice_problems": [],
             "interview_sessions": [],
             "session_submissions": [],
+            "user_daily_token_usage": [],
         }
 
 
@@ -78,6 +87,96 @@ def _query_json_db(text: str, params: list | None = None) -> dict:
     # 1. SELECT 1 / health check
     if sql == "select 1":
         return {"rows": [{"?column?": 1}], "rowCount": 1}
+
+    # User query 1: SELECT ... FROM users WHERE email = $1
+    if "from users" in sql and "where email = $1" in sql:
+        email = str(params[0]).strip().lower() if params else ""
+        users = [u for u in data.get("users", []) if str(u.get("email", "")).strip().lower() == email]
+        return {"rows": users, "rowCount": len(users)}
+
+    # User query 2: SELECT ... FROM users WHERE auth_provider = $1 AND provider_user_id = $2
+    if "from users" in sql and "auth_provider = $1" in sql and "provider_user_id = $2" in sql:
+        provider = str(params[0]) if params else ""
+        p_uid = str(params[1]) if len(params) > 1 else ""
+        users = [u for u in data.get("users", []) if u.get("auth_provider") == provider and str(u.get("provider_user_id")) == p_uid]
+        return {"rows": users, "rowCount": len(users)}
+
+    # User query 3: SELECT ... FROM users WHERE id = $1
+    if "from users" in sql and "where id = $1" in sql:
+        user_id = str(params[0]) if params else ""
+        users = [u for u in data.get("users", []) if str(u.get("id")) == user_id]
+        return {"rows": users, "rowCount": len(users)}
+
+    # User query 4: SELECT ... FROM users WHERE reset_token = $1
+    if "from users" in sql and "reset_token = $1" in sql:
+        token = str(params[0]) if params else ""
+        users = [u for u in data.get("users", []) if u.get("reset_token") == token]
+        return {"rows": users, "rowCount": len(users)}
+
+    # User query 5: INSERT INTO users ... RETURNING *
+    if "insert into users" in sql:
+        user_id = str(params[0]) if len(params) > 0 and params[0] else str(uuid.uuid4())
+        email = str(params[1]) if len(params) > 1 else ""
+        password_hash = str(params[2]) if len(params) > 2 else ""
+        name = str(params[3]) if len(params) > 3 and params[3] is not None else email.split("@")[0].capitalize()
+        profile_image = str(params[4]) if len(params) > 4 and params[4] is not None else None
+        auth_provider = str(params[5]) if len(params) > 5 and params[5] is not None else "local"
+        provider_user_id = str(params[6]) if len(params) > 6 and params[6] is not None else None
+        new_user = {
+            "id": user_id,
+            "email": email,
+            "password_hash": password_hash,
+            "name": name,
+            "profile_image": profile_image,
+            "auth_provider": auth_provider,
+            "provider_user_id": provider_user_id,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "last_login": now_iso,
+            "reset_token": None,
+            "reset_token_expires_at": None,
+        }
+        data.setdefault("users", []).append(new_user)
+        _write_json_db(data)
+        return {"rows": [new_user], "rowCount": 1}
+
+    # User query 6: UPDATE users SET last_login = ... WHERE id = $1
+    if "update users" in sql and "last_login" in sql:
+        user_id = str(params[0]) if params else ""
+        for u in data.get("users", []):
+            if str(u.get("id")) == user_id:
+                u["last_login"] = now_iso
+                _write_json_db(data)
+                return {"rows": [u], "rowCount": 1}
+        return {"rows": [], "rowCount": 0}
+
+    # User query 7: UPDATE users SET reset_token = $1, reset_token_expires_at = $2, updated_at = ... WHERE id = $3
+    if "update users" in sql and "reset_token =" in sql and "where id =" in sql and "password_hash" not in sql:
+        reset_token = params[0]
+        expires_at = params[1]
+        user_id = str(params[2])
+        for u in data.get("users", []):
+            if str(u.get("id")) == user_id:
+                u["reset_token"] = reset_token
+                u["reset_token_expires_at"] = expires_at
+                u["updated_at"] = now_iso
+                _write_json_db(data)
+                return {"rows": [u], "rowCount": 1}
+        return {"rows": [], "rowCount": 0}
+
+    # User query 8: UPDATE users SET password_hash = $1... WHERE id = $2
+    if "update users" in sql and "password_hash" in sql:
+        new_hash = params[0]
+        user_id = str(params[1])
+        for u in data.get("users", []):
+            if str(u.get("id")) == user_id:
+                u["password_hash"] = new_hash
+                u["reset_token"] = None
+                u["reset_token_expires_at"] = None
+                u["updated_at"] = now_iso
+                _write_json_db(data)
+                return {"rows": [u], "rowCount": 1}
+        return {"rows": [], "rowCount": 0}
 
     # 2. SELECT * FROM chats WHERE user_id = $1 ORDER BY updated_at DESC
     if "from chats" in sql and "order by updated_at desc" in sql:
@@ -307,7 +406,12 @@ def _query_json_db(text: str, params: list | None = None) -> dict:
 
     # 22. INSERT INTO user_memory
     if "insert into user_memory" in sql:
-        user_id, chat_id, m_type, content, embedding = params[0], params[1], params[2], params[3], params[4]
+        user_id = params[0] if len(params) > 0 else DEFAULT_USER_ID
+        chat_id = params[1] if len(params) > 1 else None
+        m_type = params[2] if len(params) > 2 else "fact"
+        content = params[3] if len(params) > 3 else ""
+        embedding = params[4] if len(params) > 4 else []
+        topic = params[5] if len(params) > 5 else None
         if isinstance(embedding, str):
             try:
                 embedding = json.loads(embedding)
@@ -320,20 +424,113 @@ def _query_json_db(text: str, params: list | None = None) -> dict:
             "type": m_type,
             "content": content,
             "embedding": embedding,
+            "topic": topic,
+            "is_active": True,
             "created_at": now_iso,
+            "updated_at": now_iso,
         }
         data.setdefault("user_memory", []).append(new_mem)
         _write_json_db(data)
         return {"rows": [new_mem], "rowCount": 1}
 
+    # 22b. UPDATE user_memory (supersede / deactivate stale memory)
+    if "update user_memory" in sql:
+        if "is_active = false" in sql or "is_active = $1" in sql:
+            target_ids = []
+            if "where id = $" in sql and params:
+                target_ids = [params[-1]]
+            elif "where id = any" in sql and params:
+                param_val = params[0]
+                target_ids = param_val if isinstance(param_val, list) else [param_val]
+            elif "where user_id = $1 and topic = $2" in sql and len(params) >= 2:
+                u_id, t_topic = params[0], params[1]
+                for m in data.get("user_memory", []):
+                    if m.get("user_id") == u_id and m.get("topic") == t_topic:
+                        m["is_active"] = False
+                        m["updated_at"] = now_iso
+                _write_json_db(data)
+                return {"rows": [], "rowCount": 1}
+
+            for m in data.get("user_memory", []):
+                if m.get("id") in target_ids:
+                    m["is_active"] = False
+                    m["updated_at"] = now_iso
+            _write_json_db(data)
+            return {"rows": [], "rowCount": len(target_ids)}
+
+        if "content = $1" in sql and "where id =" in sql:
+            new_content = params[0]
+            new_emb = params[1] if len(params) > 1 else None
+            mem_id = params[2] if len(params) > 2 else None
+            if isinstance(new_emb, str):
+                try:
+                    new_emb = json.loads(new_emb)
+                except Exception:
+                    pass
+            for m in data.get("user_memory", []):
+                if m.get("id") == mem_id:
+                    m["content"] = new_content
+                    if new_emb is not None:
+                        m["embedding"] = new_emb
+                    m["updated_at"] = now_iso
+                    m["is_active"] = True
+                    _write_json_db(data)
+                    return {"rows": [m], "rowCount": 1}
+            return {"rows": [], "rowCount": 0}
+
     # 23. SELECT * FROM user_memory
     if "from user_memory" in sql:
         user_id = params[0] if params else DEFAULT_USER_ID
         mems = [m for m in data.get("user_memory", []) if m.get("user_id") == user_id]
+        if "is_active = true" in sql or "is_active" not in sql:
+            mems = [m for m in mems if m.get("is_active", True) is not False]
         if "and chat_id = $2" in sql and len(params) > 1:
             chat_id = params[1]
             mems = [m for m in mems if m.get("chat_id") == chat_id]
+        if "type in ('fact', 'preference')" in sql or "type in ('fact','preference')" in sql:
+            mems = [m for m in mems if m.get("type") in ("fact", "preference")]
+        elif "type = 'project'" in sql:
+            mems = [m for m in mems if m.get("type") == "project"]
         return {"rows": mems, "rowCount": len(mems)}
+
+    # 24. SELECT / INSERT / UPDATE user_daily_token_usage
+    if "from user_daily_token_usage" in sql:
+        user_id = params[0] if len(params) > 0 else DEFAULT_USER_ID
+        u_date = str(params[1]) if len(params) > 1 else time.strftime("%Y-%m-%d", time.gmtime())
+        matches = [
+            u for u in data.get("user_daily_token_usage", [])
+            if u.get("user_id") == user_id and str(u.get("usage_date")) == u_date
+        ]
+        return {"rows": matches, "rowCount": len(matches)}
+
+    if "user_daily_token_usage" in sql and ("insert into" in sql or "update" in sql):
+        user_id = params[0] if len(params) > 0 else DEFAULT_USER_ID
+        u_date = str(params[1]) if len(params) > 1 else time.strftime("%Y-%m-%d", time.gmtime())
+        prompt_t = int(params[2]) if len(params) > 2 else 0
+        comp_t = int(params[3]) if len(params) > 3 else 0
+        tot_t = int(params[4]) if len(params) > 4 else (prompt_t + comp_t)
+
+        records = data.setdefault("user_daily_token_usage", [])
+        for r in records:
+            if r.get("user_id") == user_id and str(r.get("usage_date")) == u_date:
+                r["prompt_tokens"] = r.get("prompt_tokens", 0) + prompt_t
+                r["completion_tokens"] = r.get("completion_tokens", 0) + comp_t
+                r["total_tokens"] = r.get("total_tokens", 0) + tot_t
+                r["updated_at"] = now_iso
+                _write_json_db(data)
+                return {"rows": [r], "rowCount": 1}
+
+        new_r = {
+            "user_id": user_id,
+            "usage_date": u_date,
+            "prompt_tokens": prompt_t,
+            "completion_tokens": comp_t,
+            "total_tokens": tot_t,
+            "updated_at": now_iso,
+        }
+        records.append(new_r)
+        _write_json_db(data)
+        return {"rows": [new_r], "rowCount": 1}
 
     logger.warn(f"Unhandled query in JSON DB fallback: {sql}")
     return {"rows": [], "rowCount": 0}
@@ -402,6 +599,8 @@ async def init_db():
                     "005_message_document.sql",
                     "006_file_hash_dedup.sql",
                     "007_interview_coach.sql",
+                    "008_users_and_multitenancy.sql",
+                    "009_memory_recency_and_token_usage.sql",
                 ]:
                     path = os.path.join(_MIGRATIONS_DIR, filename)
                     if os.path.exists(path):

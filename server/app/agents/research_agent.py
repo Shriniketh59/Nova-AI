@@ -145,7 +145,6 @@ class ResearchAgent(BaseAgent):
                 {**s, "snippet": (doc_result["chunks"][i].get("content", "")[:400] if i < len(doc_result["chunks"]) else "")}
                 for i, s in enumerate(doc_result["sources"])
             ]
-            evidence += [{"title": "Earlier in this conversation", "type": "memory", "snippet": m} for m in memories]
             evidence += [
                 {"title": s.get("title"), "type": "web", "url": s.get("url"), "snippet": s.get("snippet"), "trustTier": s.get("trustTier")}
                 for s in ranked_web_sources

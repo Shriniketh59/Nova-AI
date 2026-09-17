@@ -10,7 +10,7 @@ from .core.config import QDRANT_URL, NODE_ENV, PORT
 from .core.db import init_db
 from .core.logger import logger
 from .retrieval.qdrant_client import ensure_all_collections
-from .routes import chats, upload, query, agent_chat, ide_agent, fs_route, nova_route, health, translate, interview_coach, documents, voice_route
+from .routes import chats, upload, query, agent_chat, ide_agent, fs_route, nova_route, health, translate, interview_coach, documents, voice_route, auth
 from .routes import orchestrator_route, local_voice_ws
 
 app = FastAPI()
@@ -49,6 +49,7 @@ async def auth_and_rate_limit_stub(request: Request, call_next):
     return await call_next(request)
 
 
+app.include_router(auth.router)
 app.include_router(chats.router)
 app.include_router(upload.router)
 app.include_router(query.router)

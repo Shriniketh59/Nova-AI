@@ -56,6 +56,7 @@ async def local_voice_ws(websocket: WebSocket):
     """
     await websocket.accept()
     chat_id = websocket.query_params.get("chatId", "")
+    selected_voice = websocket.query_params.get("voice", "en-US-AvaNeural")
 
     conversation_history: list[dict] = []
     audio_buffer = bytearray()
@@ -68,7 +69,7 @@ async def local_voice_ws(websocket: WebSocket):
         except Exception:
             pass
 
-    await safe_send({"type": "ready"})
+    await safe_send({"type": "ready", "voice": selected_voice})
     await safe_send({"type": "listening"})
 
     async def handle_turn(transcript: str):
@@ -124,13 +125,18 @@ async def local_voice_ws(websocket: WebSocket):
         if len(conversation_history) > 12:
             conversation_history[:] = conversation_history[-12:]
 
-        # TTS synthesis
+        # TTS synthesis — format conversational text without markdown artifacts
         tts_stop_event.clear()
         is_speaking = True
         await safe_send({"type": "speaking"})
 
-        from ..voice.local_voice_service import synthesize_speech
-        wav_bytes = await synthesize_speech(full_text)
+        from ..voice.local_voice_service import synthesize_speech, _clean_for_tts
+        tts_text = _clean_for_tts(full_text) or full_text
+        res = await synthesize_speech(tts_text, voice=selected_voice)
+        if isinstance(res, tuple):
+            wav_bytes, mime_type = res
+        else:
+            wav_bytes, mime_type = res, "audio/wav"
 
         if tts_stop_event.is_set():
             await safe_send({"type": "interrupted"})
@@ -143,7 +149,8 @@ async def local_voice_ws(websocket: WebSocket):
             await safe_send({
                 "type": "tts_audio",
                 "data": audio_b64,
-                "mimeType": "audio/wav",
+                "mimeType": mime_type or "audio/mpeg",
+                "voice": selected_voice,
             })
 
         is_speaking = False
@@ -214,6 +221,12 @@ async def local_voice_ws(websocket: WebSocket):
                 text_input = msg.get("text", "").strip()
                 if text_input:
                     await handle_turn(text_input)
+
+            elif msg_type == "set_voice":
+                new_voice = msg.get("voice", "").strip()
+                if new_voice:
+                    selected_voice = new_voice
+                    await safe_send({"type": "voice_changed", "voice": selected_voice})
 
             elif msg_type == "stop":
                 # Barge-in / stop playback

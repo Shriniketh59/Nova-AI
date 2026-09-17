@@ -57,16 +57,36 @@ class SupervisorAgent(BaseAgent):
         on_stage("planning")
 
         import asyncio
+        from ..orchestrator.context_filter import detect_follow_up
+        from ..core import db
+
+        history = []
+        try:
+            exclude_id = context.get("excludeMessageId")
+            if chat_id:
+                res = await db.query(
+                    "SELECT role, content FROM messages WHERE chat_id = $1 AND ($2::uuid IS NULL OR id != $2) ORDER BY created_at DESC LIMIT 8",
+                    [chat_id, exclude_id],
+                )
+                history = list(reversed(res["rows"]))
+        except Exception:
+            history = []
+
+        is_follow_up, follow_up_context, meta = detect_follow_up(question, history)
 
         async def _safe_memories():
             try:
-                return await memory_agent.get_relevant_memories(chat_id, question, context.get("excludeMessageId"), 3)
+                from ..core.config import DEFAULT_USER_ID
+                uid = context.get("userId") or DEFAULT_USER_ID
+                return await memory_agent.get_relevant_memories(chat_id, question, context.get("excludeMessageId"), 3, user_id=uid)
             except Exception:
                 return []
 
         async def _safe_conv_context():
+            if not is_follow_up:
+                return ""
             try:
-                return await get_conversation_context(chat_id)
+                return follow_up_context or await get_conversation_context(chat_id)
             except Exception:
                 return ""
 
@@ -77,7 +97,7 @@ class SupervisorAgent(BaseAgent):
         plan = planner_result["output"]
         on_stage("memory")
         memories_result, conversation_context = await asyncio.gather(memories_task, conv_context_task)
-        memories = [*memories_result, conversation_context] if conversation_context else memories_result
+        memories = [conversation_context] if conversation_context else memories_result
 
         on_stage("researching")
         research_result = await self.research.run(question, {"chatId": chat_id, "plan": plan, "hasFiles": has_files, "memories": memories})

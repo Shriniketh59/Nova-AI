@@ -17,17 +17,46 @@ _log = logging.getLogger("nova.voice_service")
 
 
 def _clean_for_tts(text: str) -> str:
-    """Strip markdown/code so espeak-ng speaks clean sentences."""
+    """
+    Format text for Siri-like human conversational speech:
+    - Strips code blocks and replaces with polite audio phrase
+    - Strips markdown formatting, links, and symbols
+    - Replaces headings with sentence breaks for natural pause
+    - Removes emojis to prevent odd phonetic pronunciations
+    - Cleans punctuation and whitespace
+    """
     if not text:
         return ""
-    t = re.sub(r"\*\*?(.*?)\*\*?", r"\1", text)
-    t = re.sub(r"#+\s*", "", t)
-    t = re.sub(r"`{1,3}[^`]*`{1,3}", "", t)
+
+    t = text
+    # Replace code blocks with concise spoken phrase
+    t = re.sub(r"```[a-zA-Z0-9_-]*\n?[\s\S]*?```", " The code implementation is provided in your chat. ", t)
+    # Inline code backticks
+    t = re.sub(r"`([^`]+)`", r"\1", t)
+    # Strip HTML tags
+    t = re.sub(r"<[^>]+>", "", t)
+    # Convert markdown links [Text](URL) -> Text
     t = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", t)
+    # Headings -> add sentence termination period so TTS takes a natural pause
+    t = re.sub(r"^#+\s*(.+)$", r"\1.", t, flags=re.MULTILINE)
+    # Remove bullet markers and list numbers
     t = re.sub(r"^[\*\-\+]\s+", "", t, flags=re.MULTILINE)
-    t = t.replace("&", " and ").replace("%", " percent ")
-    # Collapse blank lines
-    t = re.sub(r"\n{2,}", ". ", t)
+    t = re.sub(r"^\d+\.\s+", "", t, flags=re.MULTILINE)
+    # Blockquotes
+    t = re.sub(r"^>\s*", "", t, flags=re.MULTILINE)
+    # Bold / italic / strikethrough
+    t = re.sub(r"[*_~]{1,3}(.*?)[*_~]{1,3}", r"\1", t)
+    # Conversational replacements
+    t = t.replace("&", " and ").replace("%", " percent ").replace("w/", "with ")
+    t = re.sub(r"\bi\.e\.,?\s*", "that is, ", t, flags=re.I)
+    t = re.sub(r"\be\.g\.,?\s*", "for example, ", t, flags=re.I)
+    t = re.sub(r"\betc\.,?\s*", "and so on. ", t, flags=re.I)
+    # Strip emojis and supplementary symbol characters
+    t = re.sub(r"[\U00010000-\U0010ffff]", "", t)
+    t = re.sub(r"[\u2600-\u27ff]", "", t)
+    # Collapse multiple dots or spaces
+    t = re.sub(r"\.{2,}", ".", t)
+    t = re.sub(r"\n+", ". ", t)
     t = re.sub(r"\s+", " ", t)
     return t.strip()
 
@@ -37,11 +66,12 @@ async def generate_voice_reply_local(
     chat_id: Optional[str] = None,
     conversation_history: Optional[list[dict]] = None,
     language: Optional[str] = None,
+    voice: Optional[str] = None,
 ) -> dict:
     """
     Generate a spoken reply using:
     1. Local Orchestrator (Llama 3.2 via Ollama)
-    2. Local TTS (pyttsx3 + espeak-ng)
+    2. Local TTS (Siri-grade neural speech)
 
     Returns:
         {
@@ -86,8 +116,8 @@ async def generate_voice_reply_local(
         }
 
 
-async def synthesize_speech(text: str) -> bytes:
-    """Convert text to WAV bytes using local pyttsx3/espeak-ng TTS."""
+async def synthesize_speech(text: str, voice: Optional[str] = None) -> tuple[bytes, str]:
+    """Convert text to crystal-clear speech bytes and mime-type with Siri neural voice."""
     from .local_tts import get_tts
     tts = get_tts()
-    return await tts.synthesize(text)
+    return await tts.synthesize_with_mime(text, voice=voice)

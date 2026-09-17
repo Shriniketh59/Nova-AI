@@ -1,17 +1,10 @@
 """
-Local TTS — pyttsx3 + espeak-ng Text-to-Speech.
+Local TTS — Crystal-Clear Neural Text-to-Speech with pyttsx3 fallback.
 
-Fully local, no cloud API, no browser SpeechSynthesis.
-espeak-ng library is installed on this system (/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1).
-pyttsx3 wraps it for Python.
-
-The TTS engine is run in a background thread pool to avoid blocking the async event loop.
-
-Usage (async):
-    from server.app.voice.local_tts import LocalTTS
-    tts = LocalTTS.get_instance()
-    audio_bytes = await tts.synthesize("Hello, how can I help you?")
-    # audio_bytes is WAV data or empty bytes on error
+Upgrades voice clarity to state-of-the-art neural speech (edge-tts):
+- Studio-quality, natural prosody, crisp articulation without metallic distortion
+- Configurable voices (default: en-US-GuyNeural or en-US-AriaNeural)
+- Automatic fallback to pyttsx3/espeak-ng if network is offline
 """
 import asyncio
 import io
@@ -19,22 +12,28 @@ import logging
 import os
 import tempfile
 import threading
-import wave
-from typing import Optional
+from typing import Optional, Tuple
 
 logger = logging.getLogger("nova.tts")
 
-# Default voice — "English (Great Britain)" from espeak-ng
-# Can be overridden with TTS_VOICE env var
-TTS_VOICE_ID = os.environ.get("TTS_VOICE", "gmw/en")
-TTS_RATE = int(os.environ.get("TTS_RATE", "165"))   # words per minute
+# Preferred neural voice for crystal-clear, professional Siri-like speech
+TTS_VOICE_ID = os.environ.get("TTS_VOICE", "en-US-AvaNeural")
+TTS_RATE = int(os.environ.get("TTS_RATE", "165"))
 TTS_VOLUME = float(os.environ.get("TTS_VOLUME", "1.0"))
+
+SUPPORTED_VOICES = {
+    "siri_ava": "en-US-AvaNeural",
+    "siri_jenny": "en-US-JennyNeural",
+    "siri_aria": "en-US-AriaNeural",
+    "siri_andrew": "en-US-AndrewNeural",
+    "siri_sonia": "en-GB-SoniaNeural",
+}
 
 
 class LocalTTS:
     """
-    Singleton wrapper around pyttsx3 TTS engine (espeak-ng backend).
-    Engine runs in a dedicated thread to avoid event loop blocking.
+    Singleton TTS engine prioritizing crystal-clear neural speech
+    with offline pyttsx3 fallback.
     """
     _instance: Optional["LocalTTS"] = None
     _lock = threading.Lock()
@@ -42,6 +41,7 @@ class LocalTTS:
     def __init__(self):
         self._engine = None
         self._engine_lock = threading.Lock()
+        self._has_edge_tts = True
 
     @classmethod
     def get_instance(cls) -> "LocalTTS":
@@ -51,7 +51,7 @@ class LocalTTS:
                     cls._instance = cls()
         return cls._instance
 
-    def _load_engine(self):
+    def _load_pyttsx3_engine(self):
         if self._engine is not None:
             return
         with self._engine_lock:
@@ -63,38 +63,43 @@ class LocalTTS:
                 engine.setProperty("rate", TTS_RATE)
                 engine.setProperty("volume", TTS_VOLUME)
 
-                # Select English voice
                 voices = engine.getProperty("voices")
                 selected = None
                 for v in voices:
-                    if TTS_VOICE_ID in (v.id or ""):
+                    if "en" in (v.id or "").lower():
                         selected = v
                         break
-                if not selected:
-                    # Fallback: first English voice
-                    for v in voices:
-                        if "en" in (v.id or "").lower():
-                            selected = v
-                            break
                 if selected:
                     engine.setProperty("voice", selected.id)
-                    logger.info(f"TTS voice: {selected.name} ({selected.id})")
-                else:
-                    logger.warning("No English TTS voice found, using default.")
-
                 self._engine = engine
-                logger.info("pyttsx3 TTS engine loaded.")
+                logger.info("pyttsx3 fallback TTS engine loaded.")
             except Exception as e:
-                logger.error(f"Failed to load TTS engine: {e}")
-                raise
+                logger.error(f"Failed to load pyttsx3 engine: {e}")
+                self._engine = None
 
-    def _synthesize_blocking(self, text: str) -> bytes:
-        """
-        Blocking call: synthesize text → WAV bytes.
-        Saves to a temp file because pyttsx3's save_to_file is the most
-        reliable cross-driver approach.
-        """
-        self._load_engine()
+    async def _synthesize_neural(self, text: str, voice: Optional[str] = None) -> Optional[bytes]:
+        """Synthesize text using edge-tts for crystal-clear neural speech."""
+        try:
+            import edge_tts
+            target_voice = voice or TTS_VOICE_ID
+            if target_voice in SUPPORTED_VOICES:
+                target_voice = SUPPORTED_VOICES[target_voice]
+            communicate = edge_tts.Communicate(text, target_voice, rate="+0%", pitch="+0Hz")
+            chunks = []
+            async for chunk in communicate.stream():
+                if chunk.get("type") == "audio" and chunk.get("data"):
+                    chunks.append(chunk["data"])
+            if chunks:
+                return b"".join(chunks)
+        except Exception as e:
+            logger.warn(f"Neural TTS failed ({e}), falling back to pyttsx3.")
+        return None
+
+    def _synthesize_pyttsx3_blocking(self, text: str) -> bytes:
+        """Blocking pyttsx3 synthesis as an offline fallback."""
+        self._load_pyttsx3_engine()
+        if not self._engine:
+            return b""
         tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -108,7 +113,7 @@ class LocalTTS:
                     return f.read()
             return b""
         except Exception as e:
-            logger.error(f"TTS synthesis failed: {e}")
+            logger.error(f"pyttsx3 fallback failed: {e}")
             return b""
         finally:
             if tmp_path and os.path.exists(tmp_path):
@@ -117,28 +122,39 @@ class LocalTTS:
                 except Exception:
                     pass
 
-    async def synthesize(self, text: str) -> bytes:
+    async def synthesize_with_mime(self, text: str, voice: Optional[str] = None) -> Tuple[bytes, str]:
         """
-        Async wrapper — runs pyttsx3 synthesis in thread pool.
-        Returns WAV bytes or b"" on error.
+        Synthesize text to high-clarity audio bytes and return (audio_bytes, mime_type).
+        Supports custom Siri neural voices with offline pyttsx3 fallback.
         """
         if not text or not text.strip():
-            return b""
+            return b"", "audio/mpeg"
+
+        # 1. Try crystal-clear neural voice
+        if self._has_edge_tts:
+            neural_bytes = await self._synthesize_neural(text, voice=voice)
+            if neural_bytes:
+                return neural_bytes, "audio/mpeg"
+
+        # 2. Fall back to pyttsx3 WAV
         loop = asyncio.get_running_loop()
-        try:
-            return await loop.run_in_executor(None, self._synthesize_blocking, text)
-        except Exception as e:
-            logger.error(f"TTS async synthesis failed: {e}")
-            return b""
+        wav_bytes = await loop.run_in_executor(None, self._synthesize_pyttsx3_blocking, text)
+        return wav_bytes, "audio/wav"
+
+    async def synthesize(self, text: str, voice: Optional[str] = None) -> bytes:
+        """Async synthesis returning audio bytes."""
+        audio, _ = await self.synthesize_with_mime(text, voice=voice)
+        return audio
 
     def speak_blocking(self, text: str) -> None:
         """Speak text directly (blocking, for non-async contexts)."""
-        self._load_engine()
-        try:
-            self._engine.say(text)
-            self._engine.runAndWait()
-        except Exception as e:
-            logger.error(f"TTS speak failed: {e}")
+        self._load_pyttsx3_engine()
+        if self._engine:
+            try:
+                self._engine.say(text)
+                self._engine.runAndWait()
+            except Exception as e:
+                logger.error(f"TTS speak failed: {e}")
 
     def stop(self) -> None:
         """Stop any in-progress speech immediately."""

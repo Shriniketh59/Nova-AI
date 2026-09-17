@@ -77,19 +77,23 @@ def classify_intent(query: str, has_files: bool = False, has_kb_docs: bool = Fal
     has_files    : True if there are uploaded files in the current chat
     has_kb_docs  : True if the knowledge base (Vector DB) has any documents
     """
+    from ..utils.query_regularizer import regularize_query
     q = (query or "").strip()
+    reg = regularize_query(q)
+    q_norm = reg["normalized_query"]
 
-    if GREETING_RE.match(q):
+    # Check greeting on original and normalized
+    if GREETING_RE.match(q) or GREETING_RE.match(q_norm):
         return "greeting"
 
-    if is_coding_question(q):
+    if is_coding_question(q) or is_coding_question(q_norm):
         return "coding"
 
-    if CURRENT_INFO_RE.search(q):
+    if CURRENT_INFO_RE.search(q) or CURRENT_INFO_RE.search(q_norm):
         return "current_info"
 
     # Only trigger doc_query if there's something in the KB/chat to retrieve
-    if (has_files or has_kb_docs) and DOC_TRIGGER_RE.search(q):
+    if (has_files or has_kb_docs) and (DOC_TRIGGER_RE.search(q) or DOC_TRIGGER_RE.search(q_norm)):
         return "doc_query"
 
     # Long questions with local files → likely doc query
@@ -100,16 +104,29 @@ def classify_intent(query: str, has_files: bool = False, has_kb_docs: bool = Fal
 
 
 def is_coding_question(query: str) -> bool:
-    if CODE_DOMAIN_RE.search(query):
-        return True
-    if CODE_LANGS_RE.search(query) and CODE_NOUNS_RE.search(query):
-        return True
-    return bool(CODE_VERBS_RE.search(query) and (CODE_NOUNS_RE.search(query) or CODE_LANGS_RE.search(query)))
+    from ..utils.query_regularizer import regularize_query
+    q = (query or "").strip()
+    q_norm = regularize_query(q)["normalized_query"]
+
+    for candidate in (q, q_norm):
+        if CODE_DOMAIN_RE.search(candidate):
+            return True
+        if CODE_LANGS_RE.search(candidate) and CODE_NOUNS_RE.search(candidate):
+            return True
+        if bool(CODE_VERBS_RE.search(candidate) and (CODE_NOUNS_RE.search(candidate) or CODE_LANGS_RE.search(candidate))):
+            return True
+    return False
 
 
 def needs_web_search(intent: str) -> bool:
-    return intent != "greeting"
+    return intent not in ("greeting", "coding")
 
 
-def needs_vector_retrieval(intent: str) -> bool:
-    return intent in ("doc_query", "general")
+def needs_vector_retrieval(intent: str, has_files: bool = False, has_kb_docs: bool = False) -> bool:
+    if intent in ("greeting", "coding"):
+        return False
+    if intent == "doc_query":
+        return True
+    if has_files or has_kb_docs:
+        return intent == "general"
+    return False
