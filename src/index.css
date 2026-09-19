@@ -1,5 +1,32 @@
 @import "tailwindcss";
 
+/* Theme toggle: app defaults to Nova's dark palette (hardcoded zinc/black
+   classes throughout). Setting data-theme="light" on <html> flips the
+   handful of surfaces below via this custom variant, without having to
+   rewrite every hardcoded dark:* class in the app. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="light"] body {
+  background-color: #f5f5f7;
+  color: #18181b;
+}
+:root[data-theme="light"] .nova-surface {
+  background-color: #ffffff !important;
+  color: #18181b !important;
+  border-color: rgba(0, 0, 0, 0.08) !important;
+}
+:root[data-theme="light"] .nova-surface-alt {
+  background-color: #f4f4f5 !important;
+  color: #27272a !important;
+  border-color: rgba(0, 0, 0, 0.08) !important;
+}
+:root[data-theme="light"] .nova-text-muted {
+  color: #52525b !important;
+}
+
 @keyframes nova-thinking-fade {
   0%, 100% { opacity: 0.35; transform: scale(0.94); }
   50% { opacity: 1; transform: scale(1.05); filter: drop-shadow(0 0 10px rgba(168, 85, 247, 0.5)); }

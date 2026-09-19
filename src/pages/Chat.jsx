@@ -5,6 +5,17 @@ import SourceCard from '../components/SourceCard';
 import DocumentCard from '../components/DocumentCard';
 import ImageAnalysisPanel from '../components/ImageAnalysisPanel';
 import VoiceAssistantModal from '../components/VoiceAssistantModal';
+import { clockTime } from '../utils/time';
+
+// Minimal Web Speech API mic support — no existing speech/voice-to-text
+// dictation code in the repo (VoiceAssistantModal is a separate local
+// faster-whisper pipeline, not browser dictation), so this is a small,
+// real integration: browser SpeechRecognition transcribes into the
+// composer. Guarded for browsers that don't implement it.
+const SpeechRecognitionCtor =
+  typeof window !== 'undefined'
+    ? window.SpeechRecognition || window.webkitSpeechRecognition
+    : null;
 
 // Cheap heuristic, no LLM call — keeps the fast path actually fast. Routes
 // comparisons/analysis/long multi-part questions to the deep critical-thinking
@@ -24,6 +35,29 @@ const CODE_LANGS_RE = /(java|python|javascript|typescript|c\+\+|c#|go|golang|rus
 function isCodingPrompt(text) {
   if (CODE_DOMAIN_RE.test(text)) return true;
   return CODE_VERBS_RE.test(text) && (CODE_NOUNS_RE.test(text) || CODE_LANGS_RE.test(text));
+}
+
+function MessageActionButton({ title, onClick, icon }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={() => {
+        onClick();
+        if (title === 'Copy response') {
+          setDone(true);
+          setTimeout(() => setDone(false), 1500);
+        }
+      }}
+      className="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-100 px-2 py-1 rounded-lg hover:bg-white/5 transition-all"
+    >
+      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        {done ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /> : icon}
+      </svg>
+      <span>{done ? 'Copied' : title}</span>
+    </button>
+  );
 }
 
 function isComplexPrompt(text) {
@@ -46,23 +80,74 @@ export default function Chat() {
   const [attachment, setAttachment] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [showScrollButton, setShowScrollButton] = useState(false);
+  const [isListening, setIsListening] = useState(false);
 
   const messagesEndRef = useRef(null);
+  const scrollContainerRef = useRef(null);
   const fileInputRef = useRef(null);
+  const abortControllerRef = useRef(null);
+  const recognitionRef = useRef(null);
+  const userScrolledUpRef = useRef(false);
   // Set right before navigate() when a chat is created from a send-in-progress.
   // Skips the next chatId-driven reload so it doesn't wipe the in-flight
   // streaming placeholder with an empty messages list from the backend.
   const skipNextLoadRef = useRef(false);
 
-
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  const scrollToBottom = (behavior = 'smooth') => {
+    messagesEndRef.current?.scrollIntoView({ behavior });
+    userScrolledUpRef.current = false;
+    setShowScrollButton(false);
   };
 
+  // Auto-scroll while streaming, unless the user has manually scrolled up
+  // to read earlier content — in that case show a floating "scroll to
+  // bottom" button instead of yanking the view back down.
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    if (!userScrolledUpRef.current) {
+      scrollToBottom(isGenerating ? 'auto' : 'smooth');
+    }
+  }, [messages, isGenerating]);
+
+  const handleScroll = () => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const scrolledUp = distanceFromBottom > 120;
+    userScrolledUpRef.current = scrolledUp;
+    setShowScrollButton(scrolledUp);
+  };
+
+  // Web Speech API mic toggle — transcribes into the composer textarea.
+  const toggleListening = () => {
+    if (!SpeechRecognitionCtor) return;
+    if (isListening) {
+      recognitionRef.current?.stop();
+      return;
+    }
+    const recognition = new SpeechRecognitionCtor();
+    recognition.lang = 'en-US';
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results)
+        .map((r) => r[0].transcript)
+        .join(' ');
+      setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+    };
+    recognition.onerror = () => setIsListening(false);
+    recognition.onend = () => setIsListening(false);
+    recognitionRef.current = recognition;
+    setIsListening(true);
+    recognition.start();
+  };
+
+  const userStoppedRef = useRef(false);
+  const handleStopGenerating = () => {
+    userStoppedRef.current = true;
+    abortControllerRef.current?.abort();
+  };
 
   // Load messages when chatId changes
   useEffect(() => {
@@ -140,6 +225,30 @@ export default function Chat() {
   const handleSend = async (e) => {
     e.preventDefault();
     if (!input.trim() && !attachment) return;
+    const textToSend = input;
+    const attachmentToSend = attachment;
+    setInput('');
+    setAttachment(null);
+    await sendMessage(textToSend, attachmentToSend);
+  };
+
+  // Regenerate: re-sends the last user message through the same
+  // sendMessage() path (same endpoint/streaming/abort logic) after
+  // dropping the last assistant turn.
+  const handleRegenerate = async () => {
+    if (isGenerating) return;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        const lastUser = messages[i];
+        setMessages(prev => prev.slice(0, i + 1));
+        await sendMessage(lastUser.content, lastUser.attachment, { skipUserMessage: true });
+        return;
+      }
+    }
+  };
+
+  const sendMessage = async (rawInput, userAttachment, { skipUserMessage = false } = {}) => {
+    if (!rawInput?.trim() && !userAttachment) return;
 
     let activeId = chatId;
 
@@ -149,7 +258,7 @@ export default function Chat() {
         const res = await fetch('/api/chats', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: input.substring(0, 40) || 'New Chat' })
+          body: JSON.stringify({ title: rawInput.substring(0, 40) || 'New Chat' })
         });
         if (res.ok) {
           const newChat = await res.json();
@@ -170,17 +279,18 @@ export default function Chat() {
     // Attachment-only sends (no typed text) used to crash with "Failed to
     // retrieve response from server" — backend rejects an empty query string.
     // Default to a sensible prompt instead of sending "".
-    const userInput = input.trim() || (attachment ? `Please analyze this document: ${attachment.name}` : input);
-    const userAttachment = attachment;
+    const userInput = rawInput.trim() || (userAttachment ? `Please analyze this document: ${userAttachment.name}` : rawInput);
 
-    // Add user message to local state immediately
-    const userMessage = { role: 'user', content: userInput, attachment: userAttachment };
-    setMessages(prev => [...prev, userMessage]);
-    setInput('');
-    setAttachment(null);
+    // Add user message to local state immediately (skipped on regenerate —
+    // the user turn is already in the transcript).
+    if (!skipUserMessage) {
+      const userMessage = { role: 'user', content: userInput, attachment: userAttachment, timestamp: Date.now() };
+      setMessages(prev => [...prev, userMessage]);
+    }
 
     // Add placeholder message for AI streaming response
-    setMessages(prev => [...prev, { role: 'ai', content: '', isStreaming: true, isThinking: true, stageLabel: 'Thinking...' }]);
+    setMessages(prev => [...prev, { role: 'ai', content: '', isStreaming: true, isThinking: true, stageLabel: 'Thinking...', timestamp: Date.now() }]);
+    setIsGenerating(true);
 
     // Two-tier routing: cheap client-side heuristic (no LLM call, stays free
     // for the fast path) decides whether this prompt needs the full
@@ -192,6 +302,8 @@ export default function Chat() {
     // long/code answers, so the old 65s client timeout fired on healthy responses.
     const useDeepPipeline = isComplexPrompt(userInput);
     const controller = new AbortController();
+    abortControllerRef.current = controller;
+    userStoppedRef.current = false;
     const timeoutId = setTimeout(() => controller.abort(), useDeepPipeline ? 240000 : 185000);
 
     try {
@@ -258,6 +370,7 @@ export default function Chat() {
                 const updated = [...prev];
                 if (updated[updated.length - 1]) {
                   updated[updated.length - 1] = {
+                    ...updated[updated.length - 1],
                     role: 'ai',
                     content: accumulatedText,
                     isStreaming: true,
@@ -286,23 +399,43 @@ export default function Chat() {
 
     } catch (error) {
       console.error('Chat request failed:', error);
-      const message = error.name === 'AbortError'
-        ? 'Response timed out. Please try again.'
-        : (error.message || 'Unknown error');
-      setMessages(prev => {
-        const updated = [...prev];
-        if (updated[updated.length - 1]) {
-          updated[updated.length - 1] = {
-            role: 'ai',
-            content: `❌ ${message}`
-          };
-        }
-        return updated;
-      });
+      if (error.name === 'AbortError' && userStoppedRef.current) {
+        // User clicked "Stop generating" — keep whatever partial text
+        // streamed in so far, just end the stream cleanly (no error banner).
+        setMessages(prev => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last) {
+            updated[updated.length - 1] = { ...last, isStreaming: false, isThinking: false, stopped: true };
+          }
+          return updated;
+        });
+      } else {
+        const message = error.name === 'AbortError'
+          ? 'Response timed out. Please try again.'
+          : (error.message || 'Unknown error');
+        setMessages(prev => {
+          const updated = [...prev];
+          if (updated[updated.length - 1]) {
+            updated[updated.length - 1] = {
+              ...updated[updated.length - 1],
+              role: 'ai',
+              content: '',
+              isError: true,
+              errorMessage: message,
+              isStreaming: false,
+              isThinking: false
+            };
+          }
+          return updated;
+        });
+      }
     } finally {
       // Always clear the timer and ensure no message is left stuck on
       // "Thinking..." — covers success, error, and timeout/abort paths.
       clearTimeout(timeoutId);
+      abortControllerRef.current = null;
+      setIsGenerating(false);
       setMessages(prev => {
         const updated = [...prev];
         const last = updated[updated.length - 1];
@@ -328,10 +461,16 @@ export default function Chat() {
     </button>
   );
 
+  const lastAiIndex = messages.reduce((acc, m, i) => (m.role === 'ai' ? i : acc), -1);
+
   return (
-    <div className="flex flex-col h-full bg-[#09090D] text-zinc-100">
+    <div className="flex flex-col h-full nova-surface bg-[#09090D] text-zinc-100 relative">
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6">
+      <div
+        ref={scrollContainerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto px-4 py-6 space-y-6"
+      >
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center max-w-2xl mx-auto w-full space-y-8 animate-fade-in my-auto py-12">
             <div className="relative">
@@ -411,7 +550,15 @@ export default function Chat() {
                     <div className="flex items-center justify-between gap-3 pb-2.5 mb-3 border-b border-white/5">
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-semibold text-purple-300 tracking-wide">Nova Assistant</span>
+                        {msg.timestamp && (
+                          <span className="text-[10px] text-zinc-500">{clockTime(msg.timestamp)}</span>
+                        )}
                       </div>
+                    </div>
+                  )}
+                  {msg.role === 'user' && msg.timestamp && (
+                    <div className="flex justify-end mb-1">
+                      <span className="text-[10px] text-zinc-500">{clockTime(msg.timestamp)}</span>
                     </div>
                   )}
 
@@ -444,6 +591,16 @@ export default function Chat() {
                         <span className="text-[11px] text-zinc-500">Evaluating prompt and validating facts</span>
                       </div>
                     </div>
+                  ) : msg.isError ? (
+                    <div className="flex items-start gap-2.5 text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-xl px-3.5 py-3">
+                      <svg className="w-4 h-4 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+                      </svg>
+                      <div>
+                        <p className="text-sm font-medium">Generation failed</p>
+                        <p className="text-xs text-rose-300/80 mt-0.5">{msg.errorMessage}</p>
+                      </div>
+                    </div>
                   ) : (
                     <>
                       {msg.document ? (
@@ -452,6 +609,10 @@ export default function Chat() {
                         <ImageAnalysisPanel {...msg.imageAnalysis} confidence={msg.confidence} />
                       ) : (
                         msg.content && <MessageContent content={msg.content} />
+                      )}
+
+                      {msg.stopped && (
+                        <p className="text-[11px] text-zinc-500 mt-2 italic">Generation stopped.</p>
                       )}
 
                       {msg.sources && msg.sources.length > 0 && (
@@ -469,6 +630,27 @@ export default function Chat() {
                           </div>
                         </div>
                       )}
+
+                      {msg.role === 'ai' && msg.content && (
+                        <div className="flex items-center gap-1 mt-3 pt-2.5 border-t border-white/5">
+                          <MessageActionButton
+                            title="Copy response"
+                            onClick={() => navigator.clipboard?.writeText(msg.content)}
+                            icon={
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                            }
+                          />
+                          {idx === lastAiIndex && !isGenerating && (
+                            <MessageActionButton
+                              title="Regenerate response"
+                              onClick={handleRegenerate}
+                              icon={
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                              }
+                            />
+                          )}
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
@@ -479,6 +661,38 @@ export default function Chat() {
         )}
       </div>
 
+      {/* Floating scroll-to-bottom button — only shown once the user has
+          manually scrolled up away from the live tail of the conversation. */}
+      {showScrollButton && (
+        <button
+          type="button"
+          onClick={() => scrollToBottom()}
+          className="absolute bottom-28 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-zinc-800/90 hover:bg-zinc-700 border border-white/10 text-xs font-medium text-zinc-200 shadow-xl backdrop-blur-md transition-all"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+          </svg>
+          Scroll to bottom
+        </button>
+      )}
+
+      {/* Stop generating — shown while a response is actively streaming */}
+      {isGenerating && (
+        <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-10">
+          {!showScrollButton && (
+            <button
+              type="button"
+              onClick={handleStopGenerating}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-full bg-zinc-900/95 hover:bg-zinc-800 border border-white/15 text-xs font-medium text-zinc-100 shadow-xl backdrop-blur-md transition-all"
+            >
+              <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+              Stop generating
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Input Area */}
       <div className="p-4 bg-gradient-to-t from-[#0B0B0F] via-[#0B0B0F] to-transparent">
@@ -557,6 +771,24 @@ export default function Chat() {
             />
 
             <div className="flex items-center p-2 m-1">
+              {/* Mic dictation (browser Web Speech API) — transcribes into the textarea.
+                  Disabled with a tooltip when the browser doesn't support it. */}
+              <button
+                type="button"
+                disabled={!SpeechRecognitionCtor}
+                onClick={toggleListening}
+                className={`p-2 rounded-xl mr-1 transition-all border ${
+                  isListening
+                    ? 'text-white bg-rose-600/30 border-rose-500/50 animate-pulse-subtle'
+                    : 'text-zinc-400 hover:text-white hover:bg-white/5 border-transparent'
+                } disabled:opacity-30 disabled:cursor-not-allowed`}
+                title={SpeechRecognitionCtor ? (isListening ? 'Stop dictation' : 'Dictate with microphone') : 'Speech recognition is not supported in this browser'}
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
+                </svg>
+              </button>
+
               {/* Local Voice Assistant Button */}
               <button
                 type="button"
