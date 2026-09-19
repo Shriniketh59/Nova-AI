@@ -10,6 +10,7 @@ export default function Sidebar({ onLogout, mobileOpen = false, onCloseMobile })
   const { theme, toggleTheme } = useTheme();
   const [chatHistory, setChatHistory] = useState([]);
   const [search, setSearch] = useState('');
+  const [avatarFailed, setAvatarFailed] = useState(false);
   const { chatId: activeChatId } = useParams();
   const navigate = useNavigate();
 
@@ -199,8 +200,14 @@ export default function Sidebar({ onLogout, mobileOpen = false, onCloseMobile })
           onClick={handleLogout}
           title="Sign out"
         >
-          {user?.profile_image ? (
-            <img src={user.profile_image} alt={displayName} className="w-7 h-7 rounded-full object-cover border border-white/10" />
+          {user?.profile_image && !avatarFailed ? (
+            <img
+              src={user.profile_image}
+              alt={displayName}
+              referrerPolicy="no-referrer"
+              className="w-7 h-7 rounded-full object-cover border border-white/10"
+              onError={() => setAvatarFailed(true)}
+            />
           ) : (
             <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-violet-600 to-fuchsia-600 border border-white/10 flex items-center justify-center text-[10px] font-bold text-white shadow-sm">
               {initials}
