@@ -134,6 +134,84 @@ python app.py
 
 ---
 
+# 🔊 Voice Setup
+
+Nova's voice pipeline is **100% local and offline**. No cloud speech service is
+used at any point — not for speech recognition, not for speech synthesis.
+
+| Stage | Engine | Runs |
+|-------|--------|------|
+| Speech-to-text | `faster-whisper` | Locally (Python package) |
+| Reasoning | Ollama (`llama3.2:3b`) | Locally |
+| Text-to-speech | `pyttsx3` | Locally, via a **system speech engine** |
+
+### Required: install a system speech engine
+
+`pyttsx3` does not ship voices of its own — it drives whatever speech engine
+your OS provides. **Text-to-speech will not work until one is installed.**
+
+```bash
+# Debian / Ubuntu
+sudo apt install espeak-ng
+
+# Fedora / RHEL
+sudo dnf install espeak-ng
+
+# Arch
+sudo pacman -S espeak-ng
+
+# macOS — NSSpeechSynthesizer is built in, nothing to install
+# Windows — SAPI5 is built in, nothing to install
+```
+
+If no engine or voice is found, Nova does **not** crash or fail silently: the
+voice session reports an explicit `tts_unavailable` error through the voice
+state machine, and `GET /api/voice/config` returns `ttsAvailable: false` with
+the reason in `ttsError`. Text chat is unaffected.
+
+### Voice selection
+
+By default Nova enumerates the installed voices at startup and automatically
+picks the best available **English** voice, preferring **en-GB** and preferring
+a **male** voice. Nothing is hardcoded, so a voice that is not installed on your
+host is never requested.
+
+To pin a specific voice, set `TTS_VOICE_ID` — this skips auto-detection
+entirely:
+
+```bash
+# List the voice ids available on this machine
+python -c "import pyttsx3; [print(v.id, '|', v.name) for v in pyttsx3.init().getProperty('voices')]"
+
+# Then pin one
+export TTS_VOICE_ID="english-gb"
+```
+
+Other tunables: `TTS_RATE` (words per minute, default `165`) and `TTS_VOLUME`
+(`0.0`–`1.0`, default `1.0`).
+
+---
+
+# 🗂️ Vector Database
+
+Nova uses **ChromaDB** as its vector store — embedded and persistent, with no
+separate server process, no network access and no API key.
+
+The index lives at `server/data/chroma` by default; override with `CHROMA_PATH`.
+
+Qdrant remains fully implemented and selectable for deployments that already
+run it:
+
+```bash
+export VECTOR_STORE_BACKEND=qdrant
+export QDRANT_URL=http://localhost:6333
+```
+
+> **Note:** switching backends does not migrate existing vectors. Documents
+> indexed under one backend must be re-indexed to appear under the other.
+
+---
+
 # 📊 Applications
 
 NovaAI can be applied in

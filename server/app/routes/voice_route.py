@@ -125,16 +125,26 @@ async def voice_retrieval(body: VoiceRetrievalRequest):
 
 @router.get("/api/voice/config")
 async def get_voice_config():
-    """Return local voice engine capabilities."""
+    """Return local voice engine capabilities and live TTS availability."""
+    from ..core.config import OLLAMA_MODEL
+    from ..voice.local_tts import SUPPORTED_VOICES, get_tts
+
+    tts_status = get_tts().get_status()
     return {
         "engine": "local",
         "stt": "faster-whisper",
         "tts": "pyttsx3+espeak-ng",
-        "llm": "ollama/llama3.2:3b",
+        "llm": f"ollama/{OLLAMA_MODEL}",
         "wsEndpoint": "/ws/voice/local",
         "supportedLanguages": [
-            {"code": "en-IN", "name": "English", "native": "English"},
+            {"code": "en-GB", "name": "English", "native": "English"},
         ],
+        # Preference hints, resolved against the voices actually installed on
+        # the host — not fixed voice ids that may not exist.
+        "voices": [{"id": key, "label": v["label"]} for key, v in SUPPORTED_VOICES.items()],
+        "ttsAvailable": tts_status["available"],
+        "ttsError": tts_status["error"],
+        "ttsVoice": tts_status["voice_name"] or tts_status["voice_id"],
         "geminiConfigured": False,
         "fallbackEngine": "ollama",
     }
