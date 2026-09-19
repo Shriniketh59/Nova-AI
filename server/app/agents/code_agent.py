@@ -100,13 +100,65 @@ def _confidence_from_validation(validation: dict, regenerated: bool) -> dict:
     return {"score": 65, "label": "medium", "reason": f"Validation still flags: {'; '.join(validation['issues'])} — review before using in production."}
 
 
+# Questions about a specific library/framework/API benefit from real
+# documentation; self-contained algorithm questions ("reverse a linked list")
+# do not, and a retrieval round-trip would only add latency.
+LIBRARY_DOC_RE = re.compile(
+    r"\b("
+    r"react|next\.?js|vue|svelte|angular|node\.?js|express|fastapi|flask|django|"
+    r"spring|rails|laravel|pandas|numpy|pytorch|tensorflow|scikit-?learn|"
+    r"sqlalchemy|prisma|mongoose|axios|requests|httpx|pydantic|tailwind|"
+    r"docker|kubernetes|terraform|graphql|websocket|oauth|jwt|"
+    r"\bapi\b|\bsdk\b|\blibrary\b|\bframework\b|\bpackage\b|\bendpoint\b|"
+    r"how\s+do\s+i\s+use|documentation|docs\s+for|latest\s+version|deprecated"
+    r")\b",
+    re.I,
+)
+
+MAX_DOC_CONTEXT_CHARS = 2500
+
+
+def _build_doc_grounded_prompt(question: str, doc_context: str) -> str:
+    return (
+        f"{question}\n\n"
+        f"[RETRIEVED LIBRARY/API DOCUMENTATION]\n{doc_context}\n\n"
+        f"Instruction: Where the documentation above is relevant, ground your code in it — "
+        f"use the real API surface, signatures and version-appropriate idioms it shows, "
+        f"rather than recalling them from memory. Ignore any part of it that does not "
+        f"apply to the question."
+    )
+
+
 class CodeAgent(BaseAgent):
-    """Coding fast path: Question -> Code Agent -> Quick Validation -> Response.
-    Deliberately bypasses Research/Planner/Review."""
+    """Coding path: Question -> [documentation retrieval] -> Code Agent ->
+    Quick Validation -> Response.
+
+    Deliberately bypasses Research/Planner/Review for latency, but framework/
+    API questions still go through the shared retrieval pipeline first so the
+    generated code is grounded in real documentation instead of the model's
+    recollection of it."""
 
     def __init__(self):
         super().__init__("CodeAgent")
         self.review_agent = ReviewAgent()
+
+    async def _retrieve_documentation(self, question: str) -> str:
+        """Fetch library/API documentation through the same retrieval pipeline
+        the rest of the app uses (vector DB + web). Returns "" when the
+        question doesn't warrant it or retrieval fails — code generation must
+        never be blocked by a retrieval problem."""
+        if not LIBRARY_DOC_RE.search(question):
+            return ""
+        try:
+            from ..retrieval.retrieval_service import retrieve
+
+            result = await retrieve(question, top_k=4, include_web=True)
+            return (result.get("contextText") or "")[:MAX_DOC_CONTEXT_CHARS]
+        except Exception as err:
+            from ..core.logger import logger
+
+            logger.warn("code_agent.doc_retrieval_failed", {"error": str(err)})
+            return ""
 
     async def run(self, question: str, context: dict | None = None) -> dict:
         result = await self.run_stream(question, lambda token: None)
@@ -124,7 +176,13 @@ class CodeAgent(BaseAgent):
         system_prompt = LEETCODE_SYSTEM_PROMPT if DSA_RE.search(question) else CODE_SYSTEM_PROMPT
         regenerated = False
 
-        answer = await self._generate_once(system_prompt, question, on_token)
+        # Evidence-first: retrieve documentation BEFORE generating, so the
+        # model writes against real API surfaces rather than being asked to
+        # justify code it already produced.
+        doc_context = await self._retrieve_documentation(question)
+        generation_prompt = _build_doc_grounded_prompt(question, doc_context) if doc_context else question
+
+        answer = await self._generate_once(system_prompt, generation_prompt, on_token)
         validation = self._validate(answer)
 
         if not validation["pass"]:

@@ -26,6 +26,7 @@ from ..services.document_type_detector import detect_document_request, build_sum
 from ..services.rag_service import run_rag_query
 from ..services.task_router import classify_task
 from ..utils.context_manager import get_conversation_context
+from ..utils.stream_cancel import drain_task_queue
 
 router = APIRouter()
 
@@ -110,14 +111,10 @@ async def chat_query(
 
                     gen_task = asyncio.create_task(code_agent.run_stream(query, on_token))
 
-                    while not gen_task.done():
-                        try:
-                            text = await asyncio.wait_for(token_queue.get(), timeout=0.1)
-                            yield _sse({"text": text, "sources": []})
-                        except asyncio.TimeoutError:
-                            continue
-                    while not token_queue.empty():
-                        yield _sse({"text": token_queue.get_nowait(), "sources": []})
+                    # drain_task_queue cancels gen_task if the client aborts,
+                    # so Ollama stops generating instead of running on unseen.
+                    async for text in drain_task_queue(gen_task, token_queue):
+                        yield _sse({"text": text, "sources": []})
 
                     result = await gen_task
                     code_answer = result["answer"]

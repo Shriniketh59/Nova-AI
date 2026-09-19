@@ -21,6 +21,7 @@ from ..rag import fetch_chunks_for_chat, fetch_images_for_chat
 from ..services.ats_service import calculate_ats_score, format_ats_answer
 from ..services.document_type_detector import detect_document_request, build_summary
 from ..services.task_router import classify_task
+from ..utils.stream_cancel import drain_task_queue
 
 router = APIRouter()
 
@@ -107,14 +108,9 @@ async def agent_chat(body: AgentChatBody, current_user: dict = Depends(get_curre
 
                     gen_task = asyncio.create_task(code_agent.run_stream(message, on_token))
 
-                    while not gen_task.done():
-                        try:
-                            text = await asyncio.wait_for(token_queue.get(), timeout=0.1)
-                            yield _sse({"text": text, "sources": []})
-                        except asyncio.TimeoutError:
-                            continue
-                    while not token_queue.empty():
-                        yield _sse({"text": token_queue.get_nowait(), "sources": []})
+                    # Cancels gen_task if the client aborts mid-stream.
+                    async for text in drain_task_queue(gen_task, token_queue):
+                        yield _sse({"text": text, "sources": []})
 
                     result = await gen_task
                     code_answer = result["answer"]
@@ -176,14 +172,9 @@ async def agent_chat(body: AgentChatBody, current_user: dict = Depends(get_curre
                 supervisor.run(message, {"chatId": chat_id, "excludeMessageId": user_msg["id"], "onStage": on_stage, "hasFiles": has_files})
             )
 
-            while not supervisor_task.done():
-                try:
-                    event = await asyncio.wait_for(stage_queue.get(), timeout=0.2)
-                    yield _sse(event)
-                except asyncio.TimeoutError:
-                    continue
-            while not stage_queue.empty():
-                yield _sse(stage_queue.get_nowait())
+            # Cancels the whole multi-agent run if the client aborts.
+            async for event in drain_task_queue(supervisor_task, stage_queue, poll_interval=0.2):
+                yield _sse(event)
 
             result = await supervisor_task
 
