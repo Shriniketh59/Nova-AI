@@ -8,7 +8,7 @@ from ..agents.document_comparison_agent import DocumentComparisonAgent
 from ..agents.memory_agent import memory_agent
 from ..agents.research_agent import ResearchAgent
 from ..core import db
-from ..core.config import QDRANT_URL
+from ..retrieval.vector_store import get_vector_store, vector_store_enabled
 from ..middleware.auth_middleware import get_current_user
 from ..retrieval.qdrant_client import COLLECTIONS
 
@@ -175,7 +175,7 @@ async def list_documents(current_user: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 @router.get("/api/collections")
 async def list_collections():
-    if not QDRANT_URL:
+    if not vector_store_enabled():
         return {"enabled": False, "collections": []}
     return {
         "enabled": True,
@@ -205,10 +205,8 @@ async def delete_document(file_id: str, current_user: dict = Depends(get_current
         except OSError:
             pass
 
-    if QDRANT_URL:
+    if vector_store_enabled():
         try:
-            from ..retrieval.vector_store import get_vector_store
-
             store = get_vector_store()
             await store.delete(COLLECTIONS["documents"]["name"], filter={"must": [{"key": "file_id", "match": {"value": file_id}}]})
         except Exception:

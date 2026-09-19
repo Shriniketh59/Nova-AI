@@ -11,6 +11,11 @@ pytest>=8.3.0
 pytest-asyncio>=0.24.0
 respx>=0.21.1
 ddgs>=9.16.0
+# Vector store (default backend) — embedded/persistent, runs fully local.
+chromadb>=1.5.9
+# Voice: both are fully local. faster-whisper = STT, pyttsx3 = TTS (wraps
+# espeak-ng on Linux, which must be installed on the host — see README
+# "Voice Setup"). No cloud speech services are used anywhere.
 faster-whisper>=1.2.1
 pyttsx3>=2.99
 sounddevice>=0.5.6

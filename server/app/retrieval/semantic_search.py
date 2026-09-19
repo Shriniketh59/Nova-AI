@@ -1,10 +1,11 @@
 from typing import Optional
 
-from ..core.config import QDRANT_URL
+from ..core.config import QDRANT_URL, VECTOR_STORE_BACKEND
 from ..core.logger import logger
 from ..knowledge.refresh_pipeline import refresh_manager
 from ..rag import cosine_similarity, fetch_chunks_for_chat, fetch_file_ids_for_chat, generate_embedding
-from .qdrant_client import COLLECTIONS, search as qdrant_search
+from .qdrant_client import COLLECTIONS
+from .vector_store import get_vector_store, vector_store_enabled
 
 
 async def in_memory_cosine_search(
@@ -57,36 +58,56 @@ async def semantic_search(
     filters: Optional[dict] = None,
     user_id: Optional[str] = None,
 ) -> list[dict]:
-    """Dense semantic vector search across Qdrant with in-memory fallback.
+    """Dense semantic vector search through the configured VectorStore backend
+    (ChromaDB by default, Qdrant optionally) with an in-memory cosine fallback.
+
     Supports pre-computed query vectors to avoid redundant Ollama embedding calls,
-    metadata-aware payload filtering, and user isolation."""
+    metadata-aware payload filtering, and user isolation.
+
+    Falls back to the in-memory knowledge base both when the backend errors and
+    when it returns no hits, so an empty/unbuilt vector index never silently
+    yields a context-free answer.
+
+    NOTE: `QDRANT_URL` is still referenced here (rather than only inside
+    vector_store_enabled) because tests monkeypatch it on this module to
+    simulate an unreachable backend.
+    """
     q_vec = query_vector if query_vector is not None else await generate_embedding(query)
 
-    if not QDRANT_URL:
+    backend_ready = vector_store_enabled()
+    if VECTOR_STORE_BACKEND == "qdrant" and not QDRANT_URL:
+        backend_ready = False
+    if not backend_ready:
         return await in_memory_cosine_search(q_vec, chat_id, top_k, filters, user_id=user_id)
 
     try:
-        qdrant_filter: dict = {"must": []}
+        store_filter: dict = {"must": []}
 
         # If scoped to a specific chat with uploaded files
         if chat_id:
             file_ids = await fetch_file_ids_for_chat(chat_id)
             if file_ids:
-                qdrant_filter["must"].append({"key": "file_id", "match": {"any": file_ids}})
+                store_filter["must"].append({"key": "file_id", "match": {"any": file_ids}})
 
         # Metadata payload filters
         if filters:
             for k, v in filters.items():
-                qdrant_filter["must"].append({"key": k, "match": {"value": v}})
+                store_filter["must"].append({"key": k, "match": {"value": v}})
 
-        filter_arg = qdrant_filter if qdrant_filter["must"] else None
+        filter_arg = store_filter if store_filter["must"] else None
 
-        results = await qdrant_search(
+        store = get_vector_store()
+        results = await store.search(
             COLLECTIONS["documents"]["name"],
             q_vec,
             limit=top_k,
             filter=filter_arg,
         )
+
+        if not results:
+            # Index is empty or nothing matched — fall back rather than
+            # returning a context-free result.
+            return await in_memory_cosine_search(q_vec, chat_id, top_k, filters, user_id=user_id)
 
         return [
             {
@@ -108,8 +129,11 @@ async def semantic_search(
             for r in results
         ]
     except Exception as err:
-        logger.warn("semantic_search.qdrant_fallback", {"error": str(err)})
-        return await in_memory_cosine_search(q_vec, chat_id, top_k, filters)
+        logger.warn(
+            "semantic_search.vector_store_fallback",
+            {"backend": VECTOR_STORE_BACKEND, "error": str(err)},
+        )
+        return await in_memory_cosine_search(q_vec, chat_id, top_k, filters, user_id=user_id)
 
 
 async def embed_query(query: str):

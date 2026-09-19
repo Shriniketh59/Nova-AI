@@ -58,7 +58,22 @@ WEB_RETRIEVER_PROVIDER = os.environ.get("WEB_RETRIEVER_PROVIDER", "ddgs")
 
 # Which VectorStore implementation the retrieval layer should use.
 # See app/retrieval/vector_store.py for the abstraction and factory.
-VECTOR_STORE_BACKEND = os.environ.get("VECTOR_STORE_BACKEND", "qdrant").lower()
+#
+# ChromaDB is the default: it is a fully local, embedded, persistent vector
+# store (no server process, no network, no API key), which matches Nova's
+# "everything runs locally / offline" requirement. Qdrant remains fully
+# implemented and selectable via VECTOR_STORE_BACKEND=qdrant (it additionally
+# needs QDRANT_URL pointing at a running Qdrant instance).
+#
+# NOTE: switching backends does NOT migrate existing vectors. Documents that
+# were indexed into Qdrant must be re-indexed to appear in Chroma (see
+# server/scripts/backfill_qdrant.py for the equivalent Qdrant-side script).
+VECTOR_STORE_BACKEND = os.environ.get("VECTOR_STORE_BACKEND", "chroma").lower()
+
+# On-disk location for the embedded ChromaDB persistent client.
+CHROMA_PATH = os.environ.get(
+    "CHROMA_PATH", os.path.join(_ROOT_DIR, "server", "data", "chroma")
+)
 
 DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000000"
 

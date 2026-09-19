@@ -24,6 +24,8 @@ server/.env
 server/nova_ai_db*.json
 server/test/.test_db.*.json
 server/uploads/
+# Embedded ChromaDB persistent store (local vector index — rebuildable)
+server/data/
 server/rag_api/__pycache__/
 server/rag_api/rag_api.log
 .env

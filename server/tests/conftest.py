@@ -1,7 +1,14 @@
 import os
 import sys
+import tempfile
 
 os.environ.setdefault("NODE_ENV", "test")
+
+# Point the embedded ChromaDB at a throwaway directory BEFORE app.core.config
+# is imported, so tests never read from — or write into — the developer's real
+# on-disk vector store at server/data/chroma.
+_CHROMA_TEST_DIR = tempfile.mkdtemp(prefix="nova-chroma-test-")
+os.environ["CHROMA_PATH"] = _CHROMA_TEST_DIR
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -18,6 +25,23 @@ from app.core import db as db_module
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:54329/nova_ai_test?sslmode=disable"
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_chroma(tmp_path, monkeypatch):
+    """Give every test its own empty ChromaDB directory.
+
+    Chroma is now the default backend and is always enabled (unlike Qdrant,
+    which used to be a no-op whenever QDRANT_URL was unset), so indexing tests
+    genuinely write vectors. Without per-test isolation those vectors leak into
+    later tests' retrieval results.
+    """
+    import app.retrieval.vector_store as vs_module
+
+    monkeypatch.setattr(vs_module, "CHROMA_PATH", str(tmp_path / "chroma"))
+    vs_module.ChromaVectorStore.reset_client()
+    yield
+    vs_module.ChromaVectorStore.reset_client()
 
 
 @pytest_asyncio.fixture

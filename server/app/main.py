@@ -6,11 +6,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .core.config import QDRANT_URL, NODE_ENV, PORT
+from .core.config import NODE_ENV, PORT
 from .core.db import init_db
 from .core.logger import logger
 from .middleware.csrf import csrf_protect
-from .retrieval.qdrant_client import ensure_all_collections
+from .core.startup_checks import check_ollama_models, ensure_vector_store_ready
 from .routes import chats, upload, query, agent_chat, ide_agent, fs_route, nova_route, health, translate, interview_coach, documents, voice_route, auth
 from .routes import orchestrator_route, local_voice_ws
 
@@ -106,12 +106,13 @@ async def on_startup():
         logger.info("Postgres database initialized.")
     except Exception as err:
         logger.warn("Postgres unreachable, database operations will fail until DB is started", {"error": str(err)})
-    if QDRANT_URL:
-        try:
-            await ensure_all_collections()
-            logger.info("Qdrant collections ready.")
-        except Exception as err:
-            logger.warn("Qdrant unreachable, falling back to in-Python search", {"error": str(err)})
+    # Vector store (ChromaDB by default — embedded, local, no server needed).
+    await ensure_vector_store_ready()
+
+    # Verify the configured local Ollama models are actually installed. This
+    # logs an explicit error naming what is missing rather than silently
+    # falling back to some other model.
+    await check_ollama_models()
 
 
 if __name__ == "__main__":
