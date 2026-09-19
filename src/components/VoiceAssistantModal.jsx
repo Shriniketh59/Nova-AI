@@ -424,12 +424,12 @@ export default function VoiceAssistantModal({ isOpen, onClose, activeChatId, onM
       </div>
 
       {/* Main Glass Card */}
-      <div className="relative w-full max-w-xl bg-zinc-950/80 border border-white/10 rounded-3xl p-6 sm:p-8 shadow-2xl backdrop-blur-3xl flex flex-col items-center text-center overflow-hidden">
+      <div className="nova-surface-alt relative w-full max-w-xl bg-zinc-950/80 border border-white/10 nova-border rounded-3xl p-6 sm:p-8 shadow-2xl backdrop-blur-3xl flex flex-col items-center text-center overflow-hidden">
         {/* Ambient Top Glow */}
         <div className="absolute -top-24 left-1/2 -translate-x-1/2 w-96 h-48 bg-gradient-to-b from-purple-600/20 via-cyan-500/10 to-transparent blur-3xl pointer-events-none" />
 
         {/* Header */}
-        <div className="w-full flex items-center justify-between pb-3 border-b border-white/5 text-zinc-400 z-20">
+        <div className="w-full flex items-center justify-between pb-3 border-b border-white/5 nova-border text-zinc-400 nova-text-muted z-20">
           <div className="flex items-center gap-2.5">
             <span className="flex h-2.5 w-2.5 relative">
               <span
@@ -455,7 +455,7 @@ export default function VoiceAssistantModal({ isOpen, onClose, activeChatId, onM
                 }`}
               />
             </span>
-            <span className="text-xs font-semibold tracking-wider text-zinc-200">Nova Live Assistant</span>
+            <span className="text-xs font-semibold tracking-wider text-zinc-200 nova-text">Nova Live Assistant</span>
           </div>
 
           <div className="flex items-center gap-2">
@@ -476,8 +476,8 @@ export default function VoiceAssistantModal({ isOpen, onClose, activeChatId, onM
 
               {/* Voice Dropdown Menu */}
               {isVoicePickerOpen && (
-                <div className="absolute right-0 mt-2 w-64 bg-zinc-900/95 border border-white/10 rounded-2xl shadow-2xl backdrop-blur-2xl p-1.5 z-50 text-left animate-fade-in">
-                  <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-400 border-b border-white/5 mb-1">
+                <div className="nova-surface-alt absolute right-0 mt-2 w-64 bg-zinc-900/95 border border-white/10 nova-border rounded-2xl shadow-2xl backdrop-blur-2xl p-1.5 z-50 text-left animate-fade-in">
+                  <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-400 nova-text-muted border-b border-white/5 nova-border mb-1">
                     Siri English Voices
                   </div>
                   {SIRI_VOICES.map((v) => (
@@ -487,13 +487,13 @@ export default function VoiceAssistantModal({ isOpen, onClose, activeChatId, onM
                       onClick={() => handleVoiceChange(v.id)}
                       className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-colors ${
                         selectedVoice === v.id
-                          ? 'bg-purple-600/30 text-white font-medium'
-                          : 'text-zinc-300 hover:bg-white/5 hover:text-white'
+                          ? 'bg-purple-600/30 text-white nova-text font-medium'
+                          : 'text-zinc-300 nova-text-muted hover:bg-white/5 hover:text-white'
                       }`}
                     >
                       <div className="flex flex-col">
-                        <span className="text-xs">{v.name}</span>
-                        <span className="text-[10px] text-zinc-400">{v.desc}</span>
+                        <span className="text-xs nova-text">{v.name}</span>
+                        <span className="text-[10px] text-zinc-400 nova-text-muted">{v.desc}</span>
                       </div>
                       {selectedVoice === v.id && (
                         <span className="text-purple-400 text-xs font-bold">✓</span>
@@ -593,7 +593,7 @@ export default function VoiceAssistantModal({ isOpen, onClose, activeChatId, onM
 
         {/* Status label */}
         <div className="mb-3">
-          <p className="text-sm font-medium text-zinc-200 tracking-wide">
+          <p className="text-sm font-medium text-zinc-200 nova-text tracking-wide">
             {statusDetail || (status === 'listening' ? 'Listening... Speak naturally' : 'Tap the orb to start conversation')}
           </p>
           {errorMessage && (
@@ -602,13 +602,13 @@ export default function VoiceAssistantModal({ isOpen, onClose, activeChatId, onM
         </div>
 
         {/* Transcript + Spoken Reply Display */}
-        <div className="w-full min-h-[110px] max-h-[175px] overflow-y-auto px-4 py-3.5 rounded-2xl bg-zinc-900/60 border border-white/5 text-left text-sm space-y-3 relative shadow-inner">
+        <div className="nova-surface-alt w-full min-h-[110px] max-h-[175px] overflow-y-auto px-4 py-3.5 rounded-2xl bg-zinc-900/60 border border-white/5 nova-border text-left text-sm space-y-3 relative shadow-inner">
           {transcript && (
-            <div className="flex items-start gap-2.5 text-zinc-300">
+            <div className="flex items-start gap-2.5 text-zinc-300 nova-text-muted">
               <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-cyan-500/20 text-cyan-300 uppercase tracking-wider shrink-0 mt-0.5">
                 You
               </span>
-              <span className="leading-relaxed text-zinc-200">{transcript}</span>
+              <span className="leading-relaxed text-zinc-200 nova-text">{transcript}</span>
             </div>
           )}
           {replyText && (
@@ -616,7 +616,7 @@ export default function VoiceAssistantModal({ isOpen, onClose, activeChatId, onM
               <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 uppercase tracking-wider shrink-0 mt-0.5">
                 Nova
               </span>
-              <div className="leading-relaxed text-zinc-100 font-normal flex-1">
+              <div className="leading-relaxed text-zinc-100 nova-text font-normal flex-1">
                 <span>{replyText}</span>
                 {status === 'speaking' && (
                   <span className="inline-block w-1.5 h-3.5 bg-purple-400 ml-1 rounded-sm animate-pulse" />
@@ -625,14 +625,14 @@ export default function VoiceAssistantModal({ isOpen, onClose, activeChatId, onM
             </div>
           )}
           {!transcript && !replyText && (
-            <div className="flex flex-col items-center justify-center py-5 text-zinc-500 text-xs">
+            <div className="flex flex-col items-center justify-center py-5 text-zinc-500 nova-text-muted text-xs">
               <div className="flex items-center gap-1 mb-1.5 opacity-60">
                 <span className="w-1 h-3 bg-purple-400/60 rounded-full animate-pulse" />
                 <span className="w-1 h-5 bg-cyan-400/60 rounded-full animate-pulse delay-75" />
                 <span className="w-1 h-4 bg-purple-400/60 rounded-full animate-pulse delay-150" />
               </div>
-              <span className="text-zinc-300 font-medium">Ready for conversation</span>
-              <span className="text-zinc-500 text-[11px] mt-0.5">Speak clearly in English • Powered by Siri Neural Voice</span>
+              <span className="text-zinc-300 nova-text font-medium">Ready for conversation</span>
+              <span className="text-zinc-500 nova-text-muted text-[11px] mt-0.5">Speak clearly in English • Powered by Siri Neural Voice</span>
             </div>
           )}
         </div>
@@ -653,7 +653,7 @@ export default function VoiceAssistantModal({ isOpen, onClose, activeChatId, onM
             name="voiceInput"
             type="text"
             placeholder="Type or speak a question..."
-            className="flex-1 bg-zinc-900/70 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-zinc-200 placeholder-zinc-500 outline-none focus:border-purple-500/50 transition-colors"
+            className="nova-surface-alt flex-1 bg-zinc-900/70 border border-white/10 nova-border rounded-xl px-3.5 py-2.5 text-sm text-zinc-200 nova-text placeholder-zinc-500 outline-none focus:border-purple-500/50 transition-colors"
           />
           <button
             type="submit"
@@ -664,9 +664,9 @@ export default function VoiceAssistantModal({ isOpen, onClose, activeChatId, onM
         </form>
 
         {/* Footer controls */}
-        <div className="w-full flex items-center justify-between pt-3 mt-3 border-t border-white/5 text-xs text-zinc-400">
+        <div className="w-full flex items-center justify-between pt-3 mt-3 border-t border-white/5 nova-border text-xs text-zinc-400 nova-text-muted">
           <div className="flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 text-[11px] text-zinc-400">
+            <span className="inline-flex items-center gap-1.5 text-[11px] text-zinc-400 nova-text-muted">
               <span className={`w-2 h-2 rounded-full ${micActive ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'}`} />
               <span>{micActive ? 'Microphone Active' : 'Microphone Ready'}</span>
             </span>
@@ -675,7 +675,7 @@ export default function VoiceAssistantModal({ isOpen, onClose, activeChatId, onM
           <div className="flex items-center gap-2">
             <button
               onClick={connect}
-              className="text-[11px] px-2.5 py-1.5 rounded-xl border bg-zinc-800/60 text-zinc-300 border-white/10 hover:bg-zinc-700 transition-colors"
+              className="nova-btn-muted text-[11px] px-2.5 py-1.5 rounded-xl border bg-zinc-800/60 text-zinc-300 border-white/10 nova-border hover:bg-zinc-700 transition-colors"
             >
               Reset
             </button>

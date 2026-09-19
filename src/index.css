@@ -26,6 +26,19 @@
 :root[data-theme="light"] .nova-text-muted {
   color: #52525b !important;
 }
+:root[data-theme="light"] .nova-text {
+  color: #18181b !important;
+}
+:root[data-theme="light"] .nova-border {
+  border-color: rgba(0, 0, 0, 0.1) !important;
+}
+:root[data-theme="light"] .nova-btn-muted {
+  background-color: rgba(0, 0, 0, 0.06) !important;
+  color: #27272a !important;
+}
+:root[data-theme="light"] .nova-btn-muted:hover {
+  background-color: rgba(0, 0, 0, 0.1) !important;
+}
 
 @keyframes nova-thinking-fade {
   0%, 100% { opacity: 0.35; transform: scale(0.94); }

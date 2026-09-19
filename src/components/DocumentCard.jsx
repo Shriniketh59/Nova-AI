@@ -60,26 +60,26 @@ export default function DocumentCard({ title, summary, content, type }) {
   });
 
   return (
-    <div className="my-3 rounded-2xl border border-white/10 bg-white/[0.03] shadow-md overflow-hidden max-w-xl">
-      <div className="px-4 py-3 border-b border-white/10 bg-white/5">
+    <div className="nova-surface-alt my-3 rounded-2xl border border-white/10 nova-border bg-white/[0.03] shadow-md overflow-hidden max-w-xl">
+      <div className="px-4 py-3 border-b border-white/10 nova-border bg-white/5">
         <div className="flex items-center gap-2">
-          <p className="text-sm font-semibold text-white">{title || 'Generated Document'}</p>
+          <p className="text-sm font-semibold text-white nova-text">{title || 'Generated Document'}</p>
           {type && (
             <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/20">
               {humanizeType(type)}
             </span>
           )}
         </div>
-        {summary && <p className="text-xs text-zinc-400 mt-1">{summary}</p>}
+        {summary && <p className="text-xs text-zinc-400 nova-text-muted mt-1">{summary}</p>}
       </div>
 
       <div className="px-4 py-3 max-h-64 overflow-y-auto">
-        <p className="text-[13px] text-zinc-300 whitespace-pre-wrap leading-relaxed">
+        <p className="text-[13px] text-zinc-300 nova-text-muted whitespace-pre-wrap leading-relaxed">
           {content?.slice(0, 800)}{content?.length > 800 ? '…' : ''}
         </p>
       </div>
 
-      <div className="flex items-center gap-2 px-4 py-2.5 border-t border-white/10 bg-white/5 flex-wrap">
+      <div className="flex items-center gap-2 px-4 py-2.5 border-t border-white/10 nova-border bg-white/5 flex-wrap">
         <button
           onClick={handleDownloadDocx}
           disabled={busy}
@@ -90,41 +90,41 @@ export default function DocumentCard({ title, summary, content, type }) {
         <button
           onClick={handleDownloadPdf}
           disabled={busy}
-          className="text-xs font-medium px-3 py-1.5 rounded-lg bg-white/10 text-zinc-200 hover:bg-white/20 transition-colors disabled:opacity-50"
+          className="nova-btn-muted text-xs font-medium px-3 py-1.5 rounded-lg bg-white/10 text-zinc-200 hover:bg-white/20 transition-colors disabled:opacity-50"
         >
           Download PDF
         </button>
         <button
           onClick={handleDownloadMarkdown}
           disabled={busy}
-          className="text-xs font-medium px-3 py-1.5 rounded-lg bg-white/10 text-zinc-200 hover:bg-white/20 transition-colors disabled:opacity-50"
+          className="nova-btn-muted text-xs font-medium px-3 py-1.5 rounded-lg bg-white/10 text-zinc-200 hover:bg-white/20 transition-colors disabled:opacity-50"
         >
           Download Markdown
         </button>
         <button
           onClick={handleDownloadTxt}
           disabled={busy}
-          className="text-xs font-medium px-3 py-1.5 rounded-lg bg-white/10 text-zinc-200 hover:bg-white/20 transition-colors disabled:opacity-50"
+          className="nova-btn-muted text-xs font-medium px-3 py-1.5 rounded-lg bg-white/10 text-zinc-200 hover:bg-white/20 transition-colors disabled:opacity-50"
         >
           Download TXT
         </button>
         <button
           onClick={handleDownloadPptx}
           disabled={busy}
-          className="text-xs font-medium px-3 py-1.5 rounded-lg bg-white/10 text-zinc-200 hover:bg-white/20 transition-colors disabled:opacity-50"
+          className="nova-btn-muted text-xs font-medium px-3 py-1.5 rounded-lg bg-white/10 text-zinc-200 hover:bg-white/20 transition-colors disabled:opacity-50"
         >
           Download PPTX
         </button>
         <button
           onClick={handleDownloadXlsx}
           disabled={busy}
-          className="text-xs font-medium px-3 py-1.5 rounded-lg bg-white/10 text-zinc-200 hover:bg-white/20 transition-colors disabled:opacity-50"
+          className="nova-btn-muted text-xs font-medium px-3 py-1.5 rounded-lg bg-white/10 text-zinc-200 hover:bg-white/20 transition-colors disabled:opacity-50"
         >
           Download XLSX
         </button>
         <button
           onClick={handleCopy}
-          className="text-xs font-medium px-3 py-1.5 rounded-lg bg-white/10 text-zinc-200 hover:bg-white/20 transition-colors"
+          className="nova-btn-muted text-xs font-medium px-3 py-1.5 rounded-lg bg-white/10 text-zinc-200 hover:bg-white/20 transition-colors"
         >
           Copy Content
         </button>
