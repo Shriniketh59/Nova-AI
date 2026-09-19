@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from .core.config import QDRANT_URL, NODE_ENV, PORT
 from .core.db import init_db
 from .core.logger import logger
+from .middleware.csrf import csrf_protect
 from .retrieval.qdrant_client import ensure_all_collections
 from .routes import chats, upload, query, agent_chat, ide_agent, fs_route, nova_route, health, translate, interview_coach, documents, voice_route, auth
 from .routes import orchestrator_route, local_voice_ws
@@ -37,16 +38,15 @@ async def request_logging(request: Request, call_next):
     return response
 
 
-# TODO(security): this is a no-op placeholder hook for future auth/authz and
-# rate-limiting. Everything today runs as DEFAULT_USER_ID with no session
-# concept — before multi-tenant/production use, replace the pass-through
-# below with real request authentication (e.g. verify a bearer token / API
-# key, attach the resolved user to request.state.user) and a rate limiter
-# (e.g. token bucket per API key/IP), and reject unauthenticated/
-# over-quota requests before they reach route handlers.
+# TODO(security): rate-limiting is still a no-op placeholder. Auth itself is
+# handled per-route via the get_current_user dependency (see
+# app/middleware/auth_middleware.py); CSRF is handled below.
 @app.middleware("http")
 async def auth_and_rate_limit_stub(request: Request, call_next):
     return await call_next(request)
+
+
+app.middleware("http")(csrf_protect)
 
 
 app.include_router(auth.router)

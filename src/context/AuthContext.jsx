@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect } from 'react';
+import { csrfHeaders } from '../utils/csrf';
 
 const AuthContext = createContext(null);
 
@@ -72,6 +73,7 @@ export function AuthProvider({ children }) {
       await fetch('/api/auth/logout', {
         method: 'POST',
         credentials: 'include',
+        headers: csrfHeaders(),
       });
     } catch (err) {
       console.warn('Logout error:', err);

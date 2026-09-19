@@ -3,6 +3,7 @@ import { NavLink, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { relativeTime } from '../utils/time';
+import { csrfHeaders } from '../utils/csrf';
 
 export default function Sidebar({ onLogout, mobileOpen = false, onCloseMobile }) {
   const { user, logout } = useAuth();
@@ -31,7 +32,7 @@ export default function Sidebar({ onLogout, mobileOpen = false, onCloseMobile })
 
   const fetchChats = async () => {
     try {
-      const res = await fetch('/api/chats');
+      const res = await fetch('/api/chats', { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
         setChatHistory(data);
@@ -120,7 +121,9 @@ export default function Sidebar({ onLogout, mobileOpen = false, onCloseMobile })
                   if (confirm(`Delete chat "${chat.title}"?`)) {
                     try {
                       const res = await fetch(`/api/chats/${chat.id}`, {
-                        method: 'DELETE'
+                        method: 'DELETE',
+                        headers: csrfHeaders(),
+                        credentials: 'include',
                       });
                       if (res.ok) {
                         fetchChats();

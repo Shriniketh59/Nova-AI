@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import Editor from '@monaco-editor/react';
 import MessageContent from '../components/MessageContent';
+import { csrfHeaders } from '../utils/csrf';
 
 const CATEGORIES = ['arrays', 'strings', 'dynamic programming', 'graphs', 'trees', 'linked lists', 'sorting', 'searching'];
 const DIFFICULTIES = ['easy', 'medium', 'hard'];
@@ -31,7 +32,7 @@ export default function Coach() {
 
   const fetchSessions = useCallback(async () => {
     try {
-      const res = await fetch('/api/coach/sessions');
+      const res = await fetch('/api/coach/sessions', { credentials: 'include' });
       if (res.ok) setSessions(await res.json());
     } catch (err) {
       console.error('Error fetching coach sessions:', err);
@@ -48,7 +49,8 @@ export default function Coach() {
     try {
       const res = await fetch('/api/coach/problems', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: csrfHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
         body: JSON.stringify({ category, difficulty }),
       });
       if (res.ok) {
@@ -67,7 +69,7 @@ export default function Coach() {
 
   const resumeSession = async (id) => {
     try {
-      const res = await fetch(`/api/coach/sessions/${id}`);
+      const res = await fetch(`/api/coach/sessions/${id}`, { credentials: 'include' });
       if (!res.ok) return;
       const data = await res.json();
       setProblem(data.session);
@@ -86,7 +88,8 @@ export default function Coach() {
     try {
       const res = await fetch(`/api/coach/sessions/${sessionId}/submit`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: csrfHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
         body: JSON.stringify({ code, language }),
       });
       if (res.ok) {

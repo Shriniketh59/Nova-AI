@@ -6,6 +6,7 @@ import DocumentCard from '../components/DocumentCard';
 import ImageAnalysisPanel from '../components/ImageAnalysisPanel';
 import VoiceAssistantModal from '../components/VoiceAssistantModal';
 import { clockTime } from '../utils/time';
+import { csrfHeaders } from '../utils/csrf';
 
 // Minimal Web Speech API mic support — no existing speech/voice-to-text
 // dictation code in the repo (VoiceAssistantModal is a separate local
@@ -161,7 +162,7 @@ export default function Chat() {
         return;
       }
       try {
-        const res = await fetch(`/api/chats/${chatId}/messages`);
+        const res = await fetch(`/api/chats/${chatId}/messages`, { credentials: 'include' });
         if (res.ok) {
           const data = await res.json();
           // Map backend messages format if needed
@@ -187,6 +188,8 @@ export default function Chat() {
 
       const res = await fetch('/api/upload', {
         method: 'POST',
+        headers: csrfHeaders(),
+        credentials: 'include',
         body: formData
       });
 
@@ -257,7 +260,8 @@ export default function Chat() {
       try {
         const res = await fetch('/api/chats', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: csrfHeaders({ 'Content-Type': 'application/json' }),
+          credentials: 'include',
           body: JSON.stringify({ title: rawInput.substring(0, 40) || 'New Chat' })
         });
         if (res.ok) {
@@ -310,7 +314,8 @@ export default function Chat() {
       // 2. Fetch the streaming response — deep pipeline or fast single-shot
       const response = await fetch(useDeepPipeline ? '/api/agent/chat' : `/api/chats/${activeId}/query`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: csrfHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
         body: JSON.stringify(useDeepPipeline
           ? { chatId: activeId, message: userInput }
           : { query: userInput, fileId: userAttachment?.id || null }),
