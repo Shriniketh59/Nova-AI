@@ -1,10 +1,21 @@
 import { useState, useRef, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import MessageContent from '../components/MessageContent';
-import ConfidenceBadge from '../components/ConfidenceBadge';
 import SourceCard from '../components/SourceCard';
 import DocumentCard from '../components/DocumentCard';
 import ImageAnalysisPanel from '../components/ImageAnalysisPanel';
+import VoiceAssistantModal from '../components/VoiceAssistantModal';
+import { clockTime } from '../utils/time';
+
+// Minimal Web Speech API mic support — no existing speech/voice-to-text
+// dictation code in the repo (VoiceAssistantModal is a separate local
+// faster-whisper pipeline, not browser dictation), so this is a small,
+// real integration: browser SpeechRecognition transcribes into the
+// composer. Guarded for browsers that don't implement it.
+const SpeechRecognitionCtor =
+  typeof window !== 'undefined'
+    ? window.SpeechRecognition || window.webkitSpeechRecognition
+    : null;
 
 // Cheap heuristic, no LLM call — keeps the fast path actually fast. Routes
 // comparisons/analysis/long multi-part questions to the deep critical-thinking
@@ -26,6 +37,29 @@ function isCodingPrompt(text) {
   return CODE_VERBS_RE.test(text) && (CODE_NOUNS_RE.test(text) || CODE_LANGS_RE.test(text));
 }
 
+function MessageActionButton({ title, onClick, icon }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={() => {
+        onClick();
+        if (title === 'Copy response') {
+          setDone(true);
+          setTimeout(() => setDone(false), 1500);
+        }
+      }}
+      className="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-100 px-2 py-1 rounded-lg hover:bg-white/5 transition-all"
+    >
+      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        {done ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /> : icon}
+      </svg>
+      <span>{done ? 'Copied' : title}</span>
+    </button>
+  );
+}
+
 function isComplexPrompt(text) {
   const trimmed = text.trim();
   if (isCodingPrompt(trimmed)) return false;
@@ -45,20 +79,75 @@ export default function Chat() {
   const [input, setInput] = useState('');
   const [attachment, setAttachment] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
-  
+  const [showScrollButton, setShowScrollButton] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+
   const messagesEndRef = useRef(null);
+  const scrollContainerRef = useRef(null);
   const fileInputRef = useRef(null);
   const abortControllerRef = useRef(null);
+  const recognitionRef = useRef(null);
+  const userScrolledUpRef = useRef(false);
+  // Set right before navigate() when a chat is created from a send-in-progress.
+  // Skips the next chatId-driven reload so it doesn't wipe the in-flight
+  // streaming placeholder with an empty messages list from the backend.
   const skipNextLoadRef = useRef(false);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  const scrollToBottom = (behavior = 'smooth') => {
+    messagesEndRef.current?.scrollIntoView({ behavior });
+    userScrolledUpRef.current = false;
+    setShowScrollButton(false);
   };
 
+  // Auto-scroll while streaming, unless the user has manually scrolled up
+  // to read earlier content — in that case show a floating "scroll to
+  // bottom" button instead of yanking the view back down.
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    if (!userScrolledUpRef.current) {
+      scrollToBottom(isGenerating ? 'auto' : 'smooth');
+    }
+  }, [messages, isGenerating]);
+
+  const handleScroll = () => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const scrolledUp = distanceFromBottom > 120;
+    userScrolledUpRef.current = scrolledUp;
+    setShowScrollButton(scrolledUp);
+  };
+
+  // Web Speech API mic toggle — transcribes into the composer textarea.
+  const toggleListening = () => {
+    if (!SpeechRecognitionCtor) return;
+    if (isListening) {
+      recognitionRef.current?.stop();
+      return;
+    }
+    const recognition = new SpeechRecognitionCtor();
+    recognition.lang = 'en-US';
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results)
+        .map((r) => r[0].transcript)
+        .join(' ');
+      setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+    };
+    recognition.onerror = () => setIsListening(false);
+    recognition.onend = () => setIsListening(false);
+    recognitionRef.current = recognition;
+    setIsListening(true);
+    recognition.start();
+  };
+
+  const userStoppedRef = useRef(false);
+  const handleStopGenerating = () => {
+    userStoppedRef.current = true;
+    abortControllerRef.current?.abort();
+  };
 
   // Load messages when chatId changes
   useEffect(() => {
@@ -136,6 +225,30 @@ export default function Chat() {
   const handleSend = async (e) => {
     e.preventDefault();
     if (!input.trim() && !attachment) return;
+    const textToSend = input;
+    const attachmentToSend = attachment;
+    setInput('');
+    setAttachment(null);
+    await sendMessage(textToSend, attachmentToSend);
+  };
+
+  // Regenerate: re-sends the last user message through the same
+  // sendMessage() path (same endpoint/streaming/abort logic) after
+  // dropping the last assistant turn.
+  const handleRegenerate = async () => {
+    if (isGenerating) return;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        const lastUser = messages[i];
+        setMessages(prev => prev.slice(0, i + 1));
+        await sendMessage(lastUser.content, lastUser.attachment, { skipUserMessage: true });
+        return;
+      }
+    }
+  };
+
+  const sendMessage = async (rawInput, userAttachment, { skipUserMessage = false } = {}) => {
+    if (!rawInput?.trim() && !userAttachment) return;
 
     let activeId = chatId;
 
@@ -145,7 +258,7 @@ export default function Chat() {
         const res = await fetch('/api/chats', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: input.substring(0, 40) || 'New Chat' })
+          body: JSON.stringify({ title: rawInput.substring(0, 40) || 'New Chat' })
         });
         if (res.ok) {
           const newChat = await res.json();
@@ -166,17 +279,18 @@ export default function Chat() {
     // Attachment-only sends (no typed text) used to crash with "Failed to
     // retrieve response from server" — backend rejects an empty query string.
     // Default to a sensible prompt instead of sending "".
-    const userInput = input.trim() || (attachment ? `Please analyze this document: ${attachment.name}` : input);
-    const userAttachment = attachment;
+    const userInput = rawInput.trim() || (userAttachment ? `Please analyze this document: ${userAttachment.name}` : rawInput);
 
-    // Add user message to local state immediately
-    const userMessage = { role: 'user', content: userInput, attachment: userAttachment };
-    setMessages(prev => [...prev, userMessage]);
-    setInput('');
-    setAttachment(null);
+    // Add user message to local state immediately (skipped on regenerate —
+    // the user turn is already in the transcript).
+    if (!skipUserMessage) {
+      const userMessage = { role: 'user', content: userInput, attachment: userAttachment, timestamp: Date.now() };
+      setMessages(prev => [...prev, userMessage]);
+    }
 
     // Add placeholder message for AI streaming response
-    setMessages(prev => [...prev, { role: 'ai', content: '', isStreaming: true, isThinking: true, stageLabel: 'Thinking...' }]);
+    setMessages(prev => [...prev, { role: 'ai', content: '', isStreaming: true, isThinking: true, stageLabel: 'Thinking...', timestamp: Date.now() }]);
+    setIsGenerating(true);
 
     // Two-tier routing: cheap client-side heuristic (no LLM call, stays free
     // for the fast path) decides whether this prompt needs the full
@@ -189,8 +303,7 @@ export default function Chat() {
     const useDeepPipeline = isComplexPrompt(userInput);
     const controller = new AbortController();
     abortControllerRef.current = controller;
-    setIsGenerating(true);
-
+    userStoppedRef.current = false;
     const timeoutId = setTimeout(() => controller.abort(), useDeepPipeline ? 240000 : 185000);
 
     try {
@@ -230,12 +343,18 @@ export default function Chat() {
             try {
               data = JSON.parse(dataStr);
             } catch {
+              // Ignore partial chunk JSON parsing errors
               continue;
             }
             if (data.error) {
               throw new Error(data.error);
             }
             {
+              // Stage-progress events ({stage, stageLabel}) arrive while the
+              // pipeline is still working — update the "Thinking..." label
+              // instead of leaving it static for minutes. The final event
+              // carries the complete answer (no incremental tokens — the
+              // answer doesn't exist until reasoning+review finish).
               if (data.stage) {
                 setMessages(prev => {
                   const updated = [...prev];
@@ -251,6 +370,7 @@ export default function Chat() {
                 const updated = [...prev];
                 if (updated[updated.length - 1]) {
                   updated[updated.length - 1] = {
+                    ...updated[updated.length - 1],
                     role: 'ai',
                     content: accumulatedText,
                     isStreaming: true,
@@ -279,32 +399,43 @@ export default function Chat() {
 
     } catch (error) {
       console.error('Chat request failed:', error);
-      setMessages(prev => {
-        const updated = [...prev];
-        const last = updated[updated.length - 1];
-        if (error.name === 'AbortError') {
+      if (error.name === 'AbortError' && userStoppedRef.current) {
+        // User clicked "Stop generating" — keep whatever partial text
+        // streamed in so far, just end the stream cleanly (no error banner).
+        setMessages(prev => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
           if (last) {
+            updated[updated.length - 1] = { ...last, isStreaming: false, isThinking: false, stopped: true };
+          }
+          return updated;
+        });
+      } else {
+        const message = error.name === 'AbortError'
+          ? 'Response timed out. Please try again.'
+          : (error.message || 'Unknown error');
+        setMessages(prev => {
+          const updated = [...prev];
+          if (updated[updated.length - 1]) {
             updated[updated.length - 1] = {
-              ...last,
-              content: last.content || '⏹ Generation stopped.',
+              ...updated[updated.length - 1],
+              role: 'ai',
+              content: '',
+              isError: true,
+              errorMessage: message,
               isStreaming: false,
               isThinking: false
             };
           }
-        } else {
-          if (last) {
-            updated[updated.length - 1] = {
-              role: 'ai',
-              content: `❌ ${error.message || 'Unknown error'}`
-            };
-          }
-        }
-        return updated;
-      });
+          return updated;
+        });
+      }
     } finally {
+      // Always clear the timer and ensure no message is left stuck on
+      // "Thinking..." — covers success, error, and timeout/abort paths.
       clearTimeout(timeoutId);
-      setIsGenerating(false);
       abortControllerRef.current = null;
+      setIsGenerating(false);
       setMessages(prev => {
         const updated = [...prev];
         const last = updated[updated.length - 1];
@@ -316,56 +447,57 @@ export default function Chat() {
     }
   };
 
-  const handleStopGeneration = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-    setIsGenerating(false);
-  };
-
-  const QuickActionButton = ({ icon: Icon, label }) => (
-    <button className="flex items-center space-x-2 px-4 py-2.5 rounded-full border border-white/10 hover:bg-white/5 text-sm text-zinc-300 font-medium transition-all duration-200">
-      <Icon className="w-4 h-4 text-purple-400" />
+  const QuickActionButton = ({ icon: Icon, label, promptText }) => (
+    <button
+      onClick={() => {
+        if (promptText) {
+          setInput(promptText);
+        }
+      }}
+      className="flex items-center space-x-2 px-4 py-2.5 rounded-xl border border-white/10 bg-zinc-900/60 hover:bg-white/[0.08] hover:border-purple-500/40 text-sm text-zinc-300 hover:text-white font-medium transition-all duration-200 shadow-sm backdrop-blur-sm group"
+    >
+      <Icon className="w-4 h-4 text-purple-400 group-hover:scale-110 transition-transform" />
       <span>{label}</span>
     </button>
   );
 
+  const lastAiIndex = messages.reduce((acc, m, i) => (m.role === 'ai' ? i : acc), -1);
+
   return (
-    <div className="flex flex-col h-full bg-[#0B0B0F] text-zinc-100">
+    <div className="flex flex-col h-full nova-surface bg-[#09090D] text-zinc-100 relative">
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-6">
+      <div
+        ref={scrollContainerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto px-4 py-6 space-y-6"
+      >
         {messages.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center max-w-2xl mx-auto w-full space-y-8 animate-fade-in">
-            <div className="w-16 h-16 flex items-center justify-center">
-              <img src="/logo.png" alt="Nova AI" className="w-full h-full object-contain" />
+          <div className="h-full flex flex-col items-center justify-center max-w-2xl mx-auto w-full space-y-8 animate-fade-in my-auto py-12">
+            <div className="relative">
+              <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-purple-500/20 via-zinc-800 to-zinc-900 border border-purple-500/30 p-3.5 shadow-xl shadow-purple-500/10 flex items-center justify-center">
+                <img src="/logo.png" alt="Nova AI" className="w-full h-full object-contain" />
+              </div>
+              <span className="absolute -bottom-1 -right-1 w-4 h-4 bg-emerald-500 rounded-full border-2 border-[#09090D]"></span>
             </div>
-            <h2 className="text-2xl font-semibold text-white tracking-tight">How can I help you today?</h2>
             
-            <div className="flex flex-wrap justify-center gap-3 w-full">
+            <div className="text-center space-y-2">
+              <h2 className="text-2xl sm:text-3xl font-bold text-white tracking-tight bg-gradient-to-r from-white via-zinc-200 to-zinc-400 bg-clip-text text-transparent">
+                How can Nova assist you today?
+              </h2>
+              <p className="text-sm text-zinc-400 max-w-md mx-auto">
+                Accurate code generation, multimodal document analysis, deep research, and technical reasoning.
+              </p>
+            </div>
+            
+            <div className="flex flex-wrap justify-center gap-2.5 w-full max-w-lg">
               <QuickActionButton 
                 icon={(props) => (
                   <svg {...props} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
                   </svg>
                 )} 
-                label="Code" 
-              />
-              <QuickActionButton 
-                icon={(props) => (
-                  <svg {...props} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                  </svg>
-                )} 
-                label="Image" 
-              />
-              <QuickActionButton 
-                icon={(props) => (
-                  <svg {...props} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                  </svg>
-                )} 
-                label="Video" 
+                label="Code Specialist"
+                promptText="Write a clean and optimized " 
               />
               <QuickActionButton 
                 icon={(props) => (
@@ -373,7 +505,8 @@ export default function Chat() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9.5a2.5 2.5 0 00-2.5-2.5H15" />
                   </svg>
                 )} 
-                label="Research" 
+                label="Deep Research"
+                promptText="Explain the key architecture and trade-offs of " 
               />
               <QuickActionButton 
                 icon={(props) => (
@@ -381,50 +514,92 @@ export default function Chat() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                   </svg>
                 )} 
-                label="Documents" 
+                label="Document RAG"
+                promptText="Analyze this attached document and summarize its findings" 
+              />
+              <QuickActionButton 
+                icon={(props) => (
+                  <svg {...props} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                )} 
+                label="Vision & Media"
+                promptText="Analyze this image and describe " 
               />
             </div>
           </div>
         ) : (
-          <div className="max-w-3xl mx-auto w-full space-y-6 pb-20">
+          <div className="max-w-4xl mx-auto w-full space-y-6 pb-20">
             {messages.map((msg, idx) => (
-              <div key={idx} className={`flex gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+              <div key={idx} className={`flex gap-3.5 sm:gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
                 {/* Avatar */}
-                <div className={`w-8 h-8 flex-shrink-0 rounded-md flex items-center justify-center font-bold text-[10px]
-                  ${msg.role === 'user' ? 'bg-zinc-800 text-white' : ''}`}>
-                  {msg.role === 'user' ? 'YOU' : <img src="/logo.png" alt="Nova AI" className="w-full h-full object-contain rounded-md" />}
+                <div className={`w-8 h-8 sm:w-9 sm:h-9 flex-shrink-0 rounded-xl flex items-center justify-center font-bold text-[11px] shadow-md
+                  ${msg.role === 'user' 
+                    ? 'bg-gradient-to-tr from-purple-700 to-indigo-600 text-white border border-purple-400/30' 
+                    : 'bg-zinc-900 border border-white/10 p-1'}`}>
+                  {msg.role === 'user' ? 'YOU' : <img src="/logo.png" alt="Nova AI" className="w-full h-full object-contain rounded-lg" />}
                 </div>
                 
-                {/* Message Bubble */}
-                <div className={`max-w-[80%] rounded-2xl px-5 py-3.5 shadow-sm ${
+                {/* Message Bubble Card */}
+                <div className={`max-w-[85%] sm:max-w-[80%] rounded-2xl transition-all ${
                   msg.role === 'user' 
-                    ? 'bg-zinc-800/80 border border-white/5 text-zinc-100' 
-                    : 'bg-transparent text-zinc-100'
+                    ? 'px-4 sm:px-5 py-3.5 bg-gradient-to-b from-zinc-800/90 to-zinc-900/90 border border-white/10 text-zinc-100 shadow-lg shadow-black/20' 
+                    : 'px-4 sm:px-6 py-4 bg-zinc-900/60 border border-white/[0.07] text-zinc-100 shadow-xl shadow-black/40 backdrop-blur-sm'
                 }`}>
+                  {msg.role === 'ai' && !msg.isThinking && (
+                    <div className="flex items-center justify-between gap-3 pb-2.5 mb-3 border-b border-white/5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold text-purple-300 tracking-wide">Nova Assistant</span>
+                        {msg.timestamp && (
+                          <span className="text-[10px] text-zinc-500">{clockTime(msg.timestamp)}</span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {msg.role === 'user' && msg.timestamp && (
+                    <div className="flex justify-end mb-1">
+                      <span className="text-[10px] text-zinc-500">{clockTime(msg.timestamp)}</span>
+                    </div>
+                  )}
+
                   {msg.attachment && (
-                    <div className="mb-3">
+                    <div className="mb-3.5">
                       {msg.attachment.type?.startsWith('image/') || msg.attachment.url ? (
                         <img 
                           src={msg.attachment.url || '/logo.png'} 
                           alt="Uploaded attachment" 
-                          className="max-w-xs rounded-lg border border-white/10" 
+                          className="max-w-xs rounded-xl border border-white/10 shadow-md" 
                         />
                       ) : (
-                        <div className="flex items-center space-x-3 p-3 bg-white/5 border border-white/10 rounded-lg max-w-xs">
-                          <svg className="w-6 h-6 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <div className="flex items-center space-x-3 p-3 bg-zinc-800/70 border border-white/10 rounded-xl max-w-xs shadow-sm">
+                          <svg className="w-5 h-5 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                           </svg>
-                          <span className="text-sm font-medium truncate">{msg.attachment.name || 'Document'}</span>
+                          <span className="text-xs font-medium truncate text-zinc-200">{msg.attachment.name || 'Document'}</span>
                         </div>
                       )}
                     </div>
                   )}
+
                   {msg.isThinking ? (
-                    <div className="flex items-center gap-2 py-1">
+                    <div className="flex items-center gap-3 py-2">
                       <img src="/logo.png" alt="" className="w-6 h-6 object-contain animate-nova-thinking" />
-                      <span className="text-sm text-zinc-400 animate-pulse">
-                        {msg.stageLabel || 'Thinking...'}
-                      </span>
+                      <div className="flex flex-col">
+                        <span className="text-sm font-medium text-purple-300 animate-pulse-subtle">
+                          {msg.stageLabel || 'Synthesizing response...'}
+                        </span>
+                        <span className="text-[11px] text-zinc-500">Evaluating prompt and validating facts</span>
+                      </div>
+                    </div>
+                  ) : msg.isError ? (
+                    <div className="flex items-start gap-2.5 text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-xl px-3.5 py-3">
+                      <svg className="w-4 h-4 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+                      </svg>
+                      <div>
+                        <p className="text-sm font-medium">Generation failed</p>
+                        <p className="text-xs text-rose-300/80 mt-0.5">{msg.errorMessage}</p>
+                      </div>
                     </div>
                   ) : (
                     <>
@@ -435,13 +610,15 @@ export default function Chat() {
                       ) : (
                         msg.content && <MessageContent content={msg.content} />
                       )}
+
+                      {msg.stopped && (
+                        <p className="text-[11px] text-zinc-500 mt-2 italic">Generation stopped.</p>
+                      )}
+
                       {msg.sources && msg.sources.length > 0 && (
-                        <div className="mt-3 pt-3 border-t border-white/10">
-                          <div className="flex items-center justify-between mb-2">
-                            <p className="text-xs font-medium text-zinc-500">Sources</p>
-                            {/* Confidence now comes from the Review stage's LLM critique of the
-                                final answer against all gathered evidence, not just doc-match score. */}
-                            <ConfidenceBadge confidence={msg.confidence} />
+                        <div className="mt-4 pt-3.5 border-t border-white/5">
+                          <div className="flex items-center justify-between mb-2.5">
+                            <p className="text-xs font-semibold text-zinc-400 tracking-wide uppercase">Supporting Evidence</p>
                           </div>
                           {msg.contradictions && msg.contradictions.length > 0 && (
                             <p className="text-[11px] text-amber-400/90 mb-2">
@@ -453,6 +630,27 @@ export default function Chat() {
                           </div>
                         </div>
                       )}
+
+                      {msg.role === 'ai' && msg.content && (
+                        <div className="flex items-center gap-1 mt-3 pt-2.5 border-t border-white/5">
+                          <MessageActionButton
+                            title="Copy response"
+                            onClick={() => navigator.clipboard?.writeText(msg.content)}
+                            icon={
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                            }
+                          />
+                          {idx === lastAiIndex && !isGenerating && (
+                            <MessageActionButton
+                              title="Regenerate response"
+                              onClick={handleRegenerate}
+                              icon={
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                              }
+                            />
+                          )}
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
@@ -462,6 +660,39 @@ export default function Chat() {
           </div>
         )}
       </div>
+
+      {/* Floating scroll-to-bottom button — only shown once the user has
+          manually scrolled up away from the live tail of the conversation. */}
+      {showScrollButton && (
+        <button
+          type="button"
+          onClick={() => scrollToBottom()}
+          className="absolute bottom-28 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-zinc-800/90 hover:bg-zinc-700 border border-white/10 text-xs font-medium text-zinc-200 shadow-xl backdrop-blur-md transition-all"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+          </svg>
+          Scroll to bottom
+        </button>
+      )}
+
+      {/* Stop generating — shown while a response is actively streaming */}
+      {isGenerating && (
+        <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-10">
+          {!showScrollButton && (
+            <button
+              type="button"
+              onClick={handleStopGenerating}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-full bg-zinc-900/95 hover:bg-zinc-800 border border-white/15 text-xs font-medium text-zinc-100 shadow-xl backdrop-blur-md transition-all"
+            >
+              <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+              Stop generating
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Input Area */}
       <div className="p-4 bg-gradient-to-t from-[#0B0B0F] via-[#0B0B0F] to-transparent">
@@ -499,7 +730,7 @@ export default function Chat() {
           {isUploading && (
             <div className="mb-3 p-2.5 bg-zinc-800/80 border border-white/10 rounded-xl inline-flex items-center gap-3 shadow-lg backdrop-blur-md">
               <div className="w-5 h-5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-              <span className="text-xs text-zinc-300">Uploading and indexing document for RAG...</span>
+              <span className="text-xs text-zinc-300">Uploading and indexing document...</span>
             </div>
           )}
 
@@ -540,48 +771,68 @@ export default function Chat() {
             />
 
             <div className="flex items-center p-2 m-1">
-              {/* Voice Placeholder */}
-              {!isGenerating && (
-                <button 
-                  type="button" 
-                  className="p-2 text-zinc-400 hover:text-white transition-colors rounded-xl hover:bg-white/5 mr-1"
-                  title="Voice input"
-                >
-                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-                  </svg>
-                </button>
-              )}
+              {/* Mic dictation (browser Web Speech API) — transcribes into the textarea.
+                  Disabled with a tooltip when the browser doesn't support it. */}
+              <button
+                type="button"
+                disabled={!SpeechRecognitionCtor}
+                onClick={toggleListening}
+                className={`p-2 rounded-xl mr-1 transition-all border ${
+                  isListening
+                    ? 'text-white bg-rose-600/30 border-rose-500/50 animate-pulse-subtle'
+                    : 'text-zinc-400 hover:text-white hover:bg-white/5 border-transparent'
+                } disabled:opacity-30 disabled:cursor-not-allowed`}
+                title={SpeechRecognitionCtor ? (isListening ? 'Stop dictation' : 'Dictate with microphone') : 'Speech recognition is not supported in this browser'}
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
+                </svg>
+              </button>
+
+              {/* Local Voice Assistant Button */}
+              <button
+                type="button"
+                onClick={() => setIsVoiceModalOpen(true)}
+                className="p-2 text-purple-300 hover:text-white transition-all rounded-xl hover:bg-purple-600/20 mr-1 border border-purple-500/30 hover:border-purple-400/60 bg-gradient-to-tr from-purple-950/40 to-indigo-950/40 shadow-sm"
+                title="Launch Local Voice Assistant (faster-whisper + llama3.2 + pyttsx3)"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                </svg>
+              </button>
               
-              {/* Send or Stop Button */}
-              {isGenerating ? (
-                <button 
-                  type="button"
-                  onClick={handleStopGeneration}
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30 text-xs font-semibold transition-all shadow-md active:scale-95"
-                  title="Stop generating"
-                >
-                  <span className="w-2.5 h-2.5 rounded-sm bg-red-400"></span>
-                  <span>Stop</span>
-                </button>
-              ) : (
-                <button 
-                  type="submit"
-                  disabled={(!input.trim() && !attachment) || isUploading}
-                  className="p-2 rounded-xl bg-white text-black disabled:opacity-30 disabled:bg-zinc-700 disabled:text-zinc-500 transition-colors"
-                >
-                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18" />
-                  </svg>
-                </button>
-              )}
+              {/* Send Button */}
+              <button 
+                type="submit"
+                disabled={(!input.trim() && !attachment) || isUploading}
+                className="p-2 rounded-xl bg-white text-black disabled:opacity-30 disabled:bg-zinc-700 disabled:text-zinc-500 transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18" />
+                </svg>
+              </button>
             </div>
           </form>
-          <div className="text-center mt-3">
+          <div className="text-center mt-3 flex items-center justify-center gap-2">
             <span className="text-[11px] text-zinc-500">Nova AI can make mistakes. Consider verifying important information.</span>
+            <span className="text-zinc-700">•</span>
+            <button
+              onClick={() => setIsVoiceModalOpen(true)}
+              className="text-[11px] text-purple-400 hover:text-purple-300 font-medium transition-colors inline-flex items-center gap-1"
+            >
+              <span>🎙️ Try Voice Mode</span>
+            </button>
           </div>
         </div>
       </div>
+
+      {/* Local Voice Assistant Modal */}
+      <VoiceAssistantModal
+        isOpen={isVoiceModalOpen}
+        onClose={() => setIsVoiceModalOpen(false)}
+        activeChatId={chatId}
+        onMessageAdded={(newMsg) => setMessages((prev) => [...prev, newMsg])}
+      />
     </div>
   );
 }

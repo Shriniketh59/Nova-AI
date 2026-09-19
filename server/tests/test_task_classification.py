@@ -111,10 +111,3 @@ def test_classify_topic_detects_research():
 
 def test_classify_topic_falls_back_to_chat():
     assert classify_topic("hey, how's it going") == "chat"
-
-
-def test_classify_topic_categories_overlap_with_confidence_engine_contested_set():
-    from app.retrieval.confidence_engine import CONTESTED_FACT_CATEGORIES
-
-    for topic in ("biography", "medical", "legal", "news"):
-        assert topic in CONTESTED_FACT_CATEGORIES

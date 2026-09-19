@@ -24,6 +24,8 @@ CODE_DOMAIN_RE = re.compile(
 def is_coding_question(query: str) -> bool:
     if CODE_DOMAIN_RE.search(query):
         return True
+    if CODE_LANGS.search(query) and CODE_NOUNS.search(query):
+        return True
     return bool(CODE_VERBS.search(query) and (CODE_NOUNS.search(query) or CODE_LANGS.search(query)))
 
 

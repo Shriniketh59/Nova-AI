@@ -5,12 +5,15 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "start": "python3 app.py",
+    "server": "python3 app.py",
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@google/genai": "^2.22.0",
     "@google/generative-ai": "^0.24.1",
     "@monaco-editor/react": "^4.7.0",
     "docx": "^9.7.1",

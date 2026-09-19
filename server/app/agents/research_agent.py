@@ -3,7 +3,7 @@ import re
 
 import httpx
 
-from ..core.config import RAG_API_URL
+from ..core.config import OLLAMA_URL
 from ..rag import generate_embedding, cosine_similarity
 from ..retrieval.retrieval_service import retrieve
 from ..retrieval.complexity import tier_for
@@ -58,13 +58,21 @@ def detect_fact_disagreements(evidence: list[dict]) -> list[dict]:
 
 
 async def _fetch_web_sources(query: str, max_results: int = 5) -> list[dict]:
+    """DDGS web search — no API key, fully local."""
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            res = await client.post(f"{RAG_API_URL}/search", json={"query": query, "max_results": max_results})
-            if res.status_code >= 400:
-                return []
-            data = res.json()
-            return data.get("sources", [])
+        from ddgs import DDGS
+        results = []
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        return [
+            {
+                "title": r.get("title", ""),
+                "url": r.get("href", ""),
+                "snippet": (r.get("body", "") or "")[:400],
+                "type": "web",
+            }
+            for r in results
+        ][:max_results]
     except Exception:
         return []
 
@@ -137,7 +145,6 @@ class ResearchAgent(BaseAgent):
                 {**s, "snippet": (doc_result["chunks"][i].get("content", "")[:400] if i < len(doc_result["chunks"]) else "")}
                 for i, s in enumerate(doc_result["sources"])
             ]
-            evidence += [{"title": "Earlier in this conversation", "type": "memory", "snippet": m} for m in memories]
             evidence += [
                 {"title": s.get("title"), "type": "web", "url": s.get("url"), "snippet": s.get("snippet"), "trustTier": s.get("trustTier")}
                 for s in ranked_web_sources

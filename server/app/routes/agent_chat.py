@@ -3,7 +3,7 @@ import json
 import time
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -15,8 +15,8 @@ from ..agents.resume_analysis_agent import ResumeAnalysisAgent
 from ..agents.supervisor_agent import SupervisorAgent
 from ..agents.vision_agent import VisionAgent
 from ..core import db
-from ..core.config import DEFAULT_USER_ID
 from ..core.logger import logger
+from ..middleware.auth_middleware import get_current_user
 from ..rag import fetch_chunks_for_chat, fetch_images_for_chat
 from ..services.ats_service import calculate_ats_score, format_ats_answer
 from ..services.document_type_detector import detect_document_request, build_summary
@@ -51,12 +51,17 @@ class AgentChatBody(BaseModel):
 
 
 @router.post("/api/agent/chat")
-async def agent_chat(body: AgentChatBody):
+async def agent_chat(body: AgentChatBody, current_user: dict = Depends(get_current_user)):
     if not body.chatId or not body.message:
         raise HTTPException(status_code=400, detail="chatId and message are required")
 
     chat_id = body.chatId
     message = body.message
+    user_id = current_user["id"]
+
+    chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [chat_id, user_id])
+    if chat_check["rowCount"] == 0:
+        raise HTTPException(status_code=404, detail="Chat not found")
 
     async def stream():
         req_id = f"{chat_id}-{int(time.time() * 1000)}"
@@ -67,7 +72,7 @@ async def agent_chat(body: AgentChatBody):
             )
             user_msg = user_msg_result["rows"][0]
             try:
-                await memory_agent.extract_memory(DEFAULT_USER_ID, chat_id, message)
+                await memory_agent.extract_memory(user_id, chat_id, message)
             except Exception:
                 pass
 

@@ -55,15 +55,9 @@ def _extract_files(markdown: str) -> list[dict]:
     return files
 
 
-def _write_generated_file(rel_path: str, content: str) -> str:
-    safe_rel = re.sub(r"\.\.", "", rel_path.lstrip("/\\"))
-    target = os.path.abspath(os.path.join(GENERATED_ROOT, safe_rel))
-    if not target.startswith(GENERATED_ROOT):
-        raise ValueError("Path escapes generated root")
-    os.makedirs(os.path.dirname(target), exist_ok=True)
-    with open(target, "w", encoding="utf-8") as f:
-        f.write(content)
-    return os.path.relpath(target, PROJECT_ROOT).replace(os.sep, "/")
+def _format_in_memory_file(rel_path: str, content: str) -> dict:
+    safe_rel = re.sub(r"\.\.", "", rel_path.lstrip("/\\")).replace("\\", "/")
+    return {"path": safe_rel, "content": content}
 
 
 class NovaTaskBody(BaseModel):
@@ -87,16 +81,17 @@ async def nova_task(body: NovaTaskBody):
         answer = code_result["output"]["answer"]
 
         extracted = _extract_files(answer)
-        written_files = [{"path": _write_generated_file(f["path"], f["content"]), "content": f["content"]} for f in extracted]
+        # Keep generated files in-memory only — never write generated answers/code to project files
+        generated_files = [_format_in_memory_file(f["path"], f["content"]) for f in extracted]
 
         critique = await review_agent.critique(answer, question=body.prompt, evidence_summary=body.prompt, contradictions=[])
 
         return {
             "task": body.prompt,
             "plan": {"intent": plan["intent"], "steps": plan["steps"]},
-            "files": written_files,
+            "files": generated_files,
             "summary": answer,
-            "changes": [f"Created {f['path']}" for f in written_files],
+            "changes": [f"Generated in-memory: {f['path']}" for f in generated_files],
             "review": {"pass": critique["pass"], "issues": critique["issues"], "confidence": critique["confidenceScore"]},
         }
     except Exception as err:

@@ -1,12 +1,6 @@
-"""Thin document-management + capability endpoints that were only reachable
-through the streaming chat routes before. These call the same
-agents/services chat_query() already uses — no logic duplication, just a
-direct (non-streaming) REST surface for: compare, summarize, research,
-memory, and document/collection management."""
-
 import os
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..agents.document_analysis_agent import DocumentAnalysisAgent
@@ -14,7 +8,8 @@ from ..agents.document_comparison_agent import DocumentComparisonAgent
 from ..agents.memory_agent import memory_agent
 from ..agents.research_agent import ResearchAgent
 from ..core import db
-from ..core.config import DEFAULT_USER_ID, QDRANT_URL
+from ..core.config import QDRANT_URL
+from ..middleware.auth_middleware import get_current_user
 from ..retrieval.qdrant_client import COLLECTIONS
 
 router = APIRouter()
@@ -33,12 +28,18 @@ class CompareBody(BaseModel):
 
 
 @router.post("/api/compare")
-async def compare_documents(body: CompareBody):
+async def compare_documents(body: CompareBody, current_user: dict = Depends(get_current_user)):
+    user_id = current_user["id"]
+    chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [body.chatId, user_id])
+    if chat_check["rowCount"] == 0:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
     chunks = await db.query(
         """SELECT dc.content, dc.file_id, uf.original_filename
            FROM document_chunks dc JOIN uploaded_files uf ON uf.id = dc.file_id
-           WHERE uf.message_id IN (SELECT id FROM messages WHERE chat_id = $1)""",
-        [body.chatId],
+           WHERE uf.message_id IN (SELECT id FROM messages WHERE chat_id = $1)
+             AND uf.user_id = $2""",
+        [body.chatId, user_id],
     )
     by_file: dict = {}
     for c in chunks["rows"]:
@@ -64,25 +65,35 @@ class SummarizeBody(BaseModel):
 
 
 @router.post("/api/summarize")
-async def summarize(body: SummarizeBody):
+async def summarize(body: SummarizeBody, current_user: dict = Depends(get_current_user)):
+    user_id = current_user["id"]
     if body.text:
         document_text, file_name = body.text, "provided text"
     elif body.fileId:
+        file_check = await db.query("SELECT id FROM uploaded_files WHERE id = $1 AND user_id = $2", [body.fileId, user_id])
+        if not file_check["rows"]:
+            raise HTTPException(status_code=404, detail="File not found")
+
         chunks = await db.query(
             """SELECT dc.content, uf.original_filename FROM document_chunks dc
-               JOIN uploaded_files uf ON uf.id = dc.file_id WHERE dc.file_id = $1""",
-            [body.fileId],
+               JOIN uploaded_files uf ON uf.id = dc.file_id WHERE dc.file_id = $1 AND uf.user_id = $2""",
+            [body.fileId, user_id],
         )
         if not chunks["rows"]:
-            raise HTTPException(status_code=404, detail="File not found or has no indexed content")
+            raise HTTPException(status_code=404, detail="File has no indexed content")
         document_text = "\n".join(c["content"] for c in chunks["rows"])
         file_name = chunks["rows"][0]["original_filename"]
     elif body.chatId:
+        chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [body.chatId, user_id])
+        if not chat_check["rows"]:
+            raise HTTPException(status_code=404, detail="Chat not found")
+
         chunks = await db.query(
             """SELECT dc.content, uf.original_filename FROM document_chunks dc
                JOIN uploaded_files uf ON uf.id = dc.file_id
-               WHERE uf.message_id IN (SELECT id FROM messages WHERE chat_id = $1)""",
-            [body.chatId],
+               WHERE uf.message_id IN (SELECT id FROM messages WHERE chat_id = $1)
+                 AND uf.user_id = $2""",
+            [body.chatId, user_id],
         )
         if not chunks["rows"]:
             raise HTTPException(status_code=404, detail="No indexed documents found in this chat")
@@ -106,10 +117,15 @@ class ResearchBody(BaseModel):
 
 
 @router.post("/api/research")
-async def research(body: ResearchBody):
+async def research(body: ResearchBody, current_user: dict = Depends(get_current_user)):
     if not body.query:
         raise HTTPException(status_code=400, detail="query is required")
-    result = await research_agent.run(body.query, {"chatId": body.chatId})
+    if body.chatId:
+        chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [body.chatId, current_user["id"]])
+        if not chat_check["rows"]:
+            raise HTTPException(status_code=404, detail="Chat not found")
+
+    result = await research_agent.run(body.query, {"chatId": body.chatId, "userId": current_user["id"]})
     if not result["success"]:
         raise HTTPException(status_code=500, detail=result.get("error") or "Research failed")
     return result["output"]
@@ -125,10 +141,16 @@ class MemoryBody(BaseModel):
 
 
 @router.post("/api/memory")
-async def query_memory(body: MemoryBody):
+async def query_memory(body: MemoryBody, current_user: dict = Depends(get_current_user)):
     if not body.query:
         raise HTTPException(status_code=400, detail="query is required")
-    result = await memory_agent.run(body.query, {"chatId": body.chatId, "topK": body.topK or 3})
+    user_id = current_user["id"]
+    if body.chatId:
+        chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [body.chatId, user_id])
+        if not chat_check["rows"]:
+            raise HTTPException(status_code=404, detail="Chat not found")
+
+    result = await memory_agent.run(body.query, {"chatId": body.chatId, "userId": user_id, "topK": body.topK or 3})
     if not result["success"]:
         raise HTTPException(status_code=500, detail=result.get("error") or "Memory lookup failed")
     return result["output"]
@@ -138,12 +160,12 @@ async def query_memory(body: MemoryBody):
 # GET /api/documents — list all uploaded/indexed documents for the user
 # ---------------------------------------------------------------------------
 @router.get("/api/documents")
-async def list_documents():
+async def list_documents(current_user: dict = Depends(get_current_user)):
     result = await db.query(
         """SELECT id, original_filename AS name, mime_type AS type, size_bytes AS size,
                   ingest_status AS status, created_at
            FROM uploaded_files WHERE user_id = $1 ORDER BY created_at DESC""",
-        [DEFAULT_USER_ID],
+        [current_user["id"]],
     )
     return result["rows"]
 
@@ -165,15 +187,16 @@ async def list_collections():
 # DELETE /api/document/{id} — remove a document, its chunks, and its file
 # ---------------------------------------------------------------------------
 @router.delete("/api/document/{file_id}")
-async def delete_document(file_id: str):
+async def delete_document(file_id: str, current_user: dict = Depends(get_current_user)):
+    user_id = current_user["id"]
     existing = await db.query(
-        "SELECT * FROM uploaded_files WHERE id = $1 AND user_id = $2", [file_id, DEFAULT_USER_ID]
+        "SELECT * FROM uploaded_files WHERE id = $1 AND user_id = $2", [file_id, user_id]
     )
     if not existing["rows"]:
         raise HTTPException(status_code=404, detail="Document not found")
     record = existing["rows"][0]
 
-    await db.query("DELETE FROM uploaded_files WHERE id = $1 AND user_id = $2", [file_id, DEFAULT_USER_ID])
+    await db.query("DELETE FROM uploaded_files WHERE id = $1 AND user_id = $2", [file_id, user_id])
 
     file_path = record.get("file_path")
     if file_path and os.path.isfile(file_path):

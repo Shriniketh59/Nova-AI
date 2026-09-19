@@ -21,7 +21,7 @@ __pycache__/
 
 # Server runtime/secrets — never commit
 server/.env
-server/nova_ai_db.json
+server/nova_ai_db*.json
 server/test/.test_db.*.json
 server/uploads/
 server/rag_api/__pycache__/

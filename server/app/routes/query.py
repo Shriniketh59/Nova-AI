@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -15,16 +15,16 @@ from ..agents.memory_agent import memory_agent
 from ..agents.resume_analysis_agent import ResumeAnalysisAgent
 from ..agents.vision_agent import VisionAgent
 from ..core import db
-from ..core.config import DEFAULT_USER_ID, RAG_API_URL, OLLAMA_URL, OLLAMA_MODEL, get_ollama_options
 from ..core.logger import logger
+from ..middleware.auth_middleware import get_current_user
 from ..rag import fetch_chunks_for_chat, fetch_images_for_chat
+from ..orchestrator.local_orchestrator import orchestrate_stream
 from ..retrieval.complexity import tier_for
-from ..retrieval.confidence_engine import compute_answer_confidence
 from ..retrieval.retrieval_service import retrieve
 from ..services.ats_service import calculate_ats_score, format_ats_answer
 from ..services.document_type_detector import detect_document_request, build_summary
 from ..services.rag_service import run_rag_query
-from ..services.task_router import classify_task, classify_topic
+from ..services.task_router import classify_task
 from ..utils.context_manager import get_conversation_context
 
 router = APIRouter()
@@ -46,10 +46,19 @@ class ChatQueryBody(BaseModel):
 
 
 @router.post("/api/chats/{chat_id}/query")
-async def chat_query(chat_id: str, body: ChatQueryBody):
+async def chat_query(
+    chat_id: str,
+    body: ChatQueryBody,
+    current_user: dict = Depends(get_current_user),
+):
     query = body.query
     if not query:
         raise HTTPException(status_code=400, detail="Query text is required")
+
+    user_id = current_user["id"]
+    chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [chat_id, user_id])
+    if chat_check["rowCount"] == 0:
+        raise HTTPException(status_code=404, detail="Chat not found")
 
     async def stream():
         req_id = f"{chat_id}-{int(time.time() * 1000)}"
@@ -60,14 +69,14 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
             )
             user_msg = user_msg_result["rows"][0]
             try:
-                await memory_agent.extract_memory(DEFAULT_USER_ID, chat_id, query)
+                await memory_agent.extract_memory(user_id, chat_id, query)
             except Exception:
                 pass
 
             if body.fileId:
                 await db.query(
                     "UPDATE uploaded_files SET message_id = $1 WHERE id = $2 AND user_id = $3",
-                    [user_msg["id"], body.fileId, DEFAULT_USER_ID],
+                    [user_msg["id"], body.fileId, user_id],
                 )
 
             all_chat_chunks = await fetch_chunks_for_chat(chat_id)
@@ -86,7 +95,7 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
 
                 await db.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)", [chat_id, "ai", answer])
                 await db.query("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [chat_id])
-                yield _sse({"text": answer, "sources": [{"filename": image["original_filename"], "type": "image"}], "confidence": confidence})
+                yield _sse({"text": answer, "sources": [{"filename": image["original_filename"], "type": "image"}]})
                 yield "data: [DONE]\n\n"
                 return
 
@@ -117,7 +126,7 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
                     await db.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)", [chat_id, "ai", code_answer])
                     await db.query("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [chat_id])
 
-                    yield _sse({"text": code_answer, "sources": [], "confidence": confidence})
+                    yield _sse({"text": code_answer, "sources": []})
                 except Exception as err:
                     logger.error("codeAgent.failed", {"chatId": chat_id, "error": str(err)})
                     yield _sse({"error": str(err)})
@@ -141,112 +150,60 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
 
                     await db.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)", [chat_id, "ai", answer])
                     await db.query("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [chat_id])
-                    yield _sse({"text": answer, "sources": source_cards, "confidence": confidence})
+                    yield _sse({"text": answer, "sources": source_cards})
                     yield "data: [DONE]\n\n"
                     return
 
                 if task["type"] == "ats":
                     ats_result = calculate_ats_score(document_text)
                     answer = format_ats_answer(ats_result)
-                    confidence = {"score": ats_result["score"], "label": "high" if ats_result["score"] >= 70 else "medium" if ats_result["score"] >= 30 else "low", "reason": "Calculated from parsed resume content."}
                 elif task["type"] == "resume_analysis":
                     result = await resume_analysis_agent.run(query, {"documentText": document_text, "fileName": file_name})
                     answer = result["output"]["answer"]
-                    confidence = {"score": 75 if result["success"] else 0, "label": "high" if result["success"] else "low", "reason": "Based on uploaded resume content only."}
                 else:
                     result = await document_analysis_agent.run(query, {"documentText": document_text, "fileName": file_name})
                     answer = result["output"]["answer"]
-                    confidence = {"score": 75 if result["success"] else 0, "label": "high" if result["success"] else "low", "reason": "Based on uploaded document content only."}
 
                 await db.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)", [chat_id, "ai", answer])
                 await db.query("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [chat_id])
-                yield _sse({"text": answer, "sources": [{"filename": file_name, "type": "document"}], "confidence": confidence})
+                yield _sse({"text": answer, "sources": [{"filename": file_name, "type": "document"}]})
                 yield "data: [DONE]\n\n"
                 return
 
-            tier = tier_for(query)
-            retrieval_result = await retrieve(query, chat_id, top_k=tier["topK"])
-            memories = await memory_agent.get_relevant_memories(chat_id, query, user_msg["id"], 3)
-            conversation_context = await get_conversation_context(chat_id, query=query)
-
-            context_blocks = []
-            if retrieval_result["contextText"]:
-                context_blocks.append(f"[Document context]\n{retrieval_result['contextText']}")
-            if memories:
-                context_blocks.append(f"[Relevant earlier facts]\n{chr(10).join(memories)}")
-            if conversation_context:
-                context_blocks.append(conversation_context)
-            context_text = "\n\n".join(context_blocks)
-
-            use_web_search = not has_files and (
-                retrieval_result["confidence"]["label"] != "high" or len(retrieval_result["chunks"]) < tier["minSources"]
-            )
-
+            # Use local orchestrator for general queries
             accumulated_text = ""
             sources = []
-            try:
-                async with httpx.AsyncClient(timeout=180) as client:
-                    async with client.stream(
-                        "POST",
-                        f"{RAG_API_URL}/query/stream",
-                        json={"query": query, "context": context_text, "web_search": use_web_search},
-                    ) as rag_res:
-                        if rag_res.status_code >= 400:
-                            raise RuntimeError(f"RAG API error: {rag_res.status_code}")
 
-                        async for line in rag_res.aiter_lines():
-                            if not line.strip():
-                                continue
-                            try:
-                                data = json.loads(line)
-                            except Exception:
-                                continue
-                            if data.get("sources"):
-                                sources = data["sources"]
-                                yield _sse({"text": "", "sources": sources})
-                            if data.get("token"):
-                                accumulated_text += data["token"]
-                                yield _sse({"text": accumulated_text, "sources": sources})
-                            if data.get("replace") is not None:
-                                accumulated_text = data["replace"]
-                                yield _sse({"text": accumulated_text, "sources": sources})
-            except Exception as rag_err:
-                logger.warn(f"RAG API stream unavailable ({rag_err}), streaming directly from Ollama")
-                async with httpx.AsyncClient(timeout=180) as client:
-                    sys_prompt = f"You are Nova AI assistant. Answer accurately based on context.\n{context_text}" if context_text else "You are Nova AI assistant. Answer clearly and accurately."
-                    convo = [
-                        {"role": "system", "content": sys_prompt},
-                        {"role": "user", "content": query},
-                    ]
-                    async with client.stream(
-                        "POST",
-                        f"{OLLAMA_URL}/api/chat",
-                        json={
-                            "model": OLLAMA_MODEL,
-                            "stream": True,
-                            "messages": convo,
-                            "options": get_ollama_options({"temperature": 0.3, "num_predict": 512}),
-                        },
-                    ) as o_res:
-                        if o_res.status_code < 400:
-                            async for line in o_res.aiter_lines():
-                                if not line.strip():
-                                    continue
-                                chunk = json.loads(line)
-                                token = (chunk.get("message") or {}).get("content", "")
-                                if token:
-                                    accumulated_text += token
-                                    yield _sse({"text": accumulated_text, "sources": sources})
+            # Build conversation context for orchestrator (excluding the message just inserted)
+            conversation_history = []
+            try:
+                ctx_rows = await db.query(
+                    "SELECT role, content FROM messages WHERE chat_id = $1 AND id != $2 ORDER BY created_at DESC LIMIT 8",
+                    [chat_id, user_msg["id"]],
+                )
+                conversation_history = list(reversed(ctx_rows["rows"]))
+            except Exception:
+                pass
+
+            async for data in orchestrate_stream(
+                query=query,
+                chat_id=chat_id,
+                conversation_history=conversation_history,
+                is_voice=False,
+                user_id=user_id,
+            ):
+                if data.get("sources"):
+                    sources = data["sources"]
+                    yield _sse({"text": "", "sources": sources})
+                if data.get("token"):
+                    accumulated_text += data["token"]
+                    yield _sse({"text": accumulated_text, "sources": sources})
+                if data.get("replace") is not None:
+                    accumulated_text = data["replace"]
+                    yield _sse({"text": accumulated_text, "sources": sources})
 
             web_source_cards = [{**s, "type": "web"} for s in sources]
-            all_source_cards = [*retrieval_result["sources"], *web_source_cards]
-            answer_confidence = compute_answer_confidence(
-                source_count=len(all_source_cards),
-                contradictions=[],
-                doc_confidence=retrieval_result["confidence"],
-                has_web_sources=len(web_source_cards) > 0,
-                category=classify_topic(query),
-            )
+            all_source_cards = web_source_cards
 
             doc_type = detect_document_request(query)
             document = None
@@ -261,7 +218,7 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
                     "exportFormats": ["docx", "pdf", "pptx", "xlsx", "markdown", "txt"],
                 }
 
-            yield _sse({"text": accumulated_text, "sources": all_source_cards, "confidence": answer_confidence, "document": document})
+            yield _sse({"text": accumulated_text, "sources": all_source_cards, "document": document})
 
             await db.query(
                 "INSERT INTO messages (chat_id, role, content, document) VALUES ($1, $2, $3, $4)",
@@ -284,9 +241,14 @@ class ChatRagBody(BaseModel):
 
 
 @router.post("/api/chat/rag")
-async def chat_rag(body: ChatRagBody):
+async def chat_rag(body: ChatRagBody, current_user: dict = Depends(get_current_user)):
     if not body.chatId or not body.message:
         raise HTTPException(status_code=400, detail="chatId and message are required")
+
+    user_id = current_user["id"]
+    chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [body.chatId, user_id])
+    if chat_check["rowCount"] == 0:
+        raise HTTPException(status_code=404, detail="Chat not found")
 
     try:
         await db.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)", [body.chatId, "user", body.message])
