@@ -8,15 +8,13 @@ import VoiceAssistantModal from '../components/VoiceAssistantModal';
 import { clockTime } from '../utils/time';
 import { csrfHeaders } from '../utils/csrf';
 
-// Minimal Web Speech API mic support — no existing speech/voice-to-text
-// dictation code in the repo (VoiceAssistantModal is a separate local
-// faster-whisper pipeline, not browser dictation), so this is a small,
-// real integration: browser SpeechRecognition transcribes into the
-// composer. Guarded for browsers that don't implement it.
-const SpeechRecognitionCtor =
-  typeof window !== 'undefined'
-    ? window.SpeechRecognition || window.webkitSpeechRecognition
-    : null;
+// NOTE: the browser Web Speech API dictation that used to live here was
+// removed. In Chrome, SpeechRecognition streams microphone audio to Google's
+// servers for transcription — a cloud STT service, which this project forbids.
+// It was also a second, parallel voice path alongside the local
+// faster-whisper pipeline. Both are now consolidated into the single local
+// pipeline behind VoiceAssistantModal (/ws/voice/local), which reuses the
+// exact same orchestrator/RAG/LLM as text chat.
 
 // Cheap heuristic, no LLM call — keeps the fast path actually fast. Routes
 // comparisons/analysis/long multi-part questions to the deep critical-thinking
@@ -83,13 +81,11 @@ export default function Chat() {
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [showScrollButton, setShowScrollButton] = useState(false);
-  const [isListening, setIsListening] = useState(false);
 
   const messagesEndRef = useRef(null);
   const scrollContainerRef = useRef(null);
   const fileInputRef = useRef(null);
   const abortControllerRef = useRef(null);
-  const recognitionRef = useRef(null);
   const userScrolledUpRef = useRef(false);
   // Set right before navigate() when a chat is created from a send-in-progress.
   // Skips the next chatId-driven reload so it doesn't wipe the in-flight
@@ -118,30 +114,6 @@ export default function Chat() {
     const scrolledUp = distanceFromBottom > 120;
     userScrolledUpRef.current = scrolledUp;
     setShowScrollButton(scrolledUp);
-  };
-
-  // Web Speech API mic toggle — transcribes into the composer textarea.
-  const toggleListening = () => {
-    if (!SpeechRecognitionCtor) return;
-    if (isListening) {
-      recognitionRef.current?.stop();
-      return;
-    }
-    const recognition = new SpeechRecognitionCtor();
-    recognition.lang = 'en-US';
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-    recognition.onresult = (event) => {
-      const transcript = Array.from(event.results)
-        .map((r) => r[0].transcript)
-        .join(' ');
-      setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
-    };
-    recognition.onerror = () => setIsListening(false);
-    recognition.onend = () => setIsListening(false);
-    recognitionRef.current = recognition;
-    setIsListening(true);
-    recognition.start();
   };
 
   const userStoppedRef = useRef(false);
@@ -776,36 +748,19 @@ export default function Chat() {
             />
 
             <div className="flex items-center p-2 m-1">
-              {/* Mic dictation (browser Web Speech API) — transcribes into the textarea.
-                  Disabled with a tooltip when the browser doesn't support it. */}
+              {/* Voice — opens the local voice session (faster-whisper STT +
+                  the same orchestrator/RAG/LLM as text + pyttsx3 TTS). */}
               <button
                 type="button"
-                disabled={!SpeechRecognitionCtor}
-                onClick={toggleListening}
-                className={`p-2 rounded-xl mr-1 transition-all border ${
-                  isListening
-                    ? 'text-white bg-rose-600/30 border-rose-500/50 animate-pulse-subtle'
-                    : 'text-zinc-400 hover:text-white hover:bg-white/5 border-transparent'
-                } disabled:opacity-30 disabled:cursor-not-allowed`}
-                title={SpeechRecognitionCtor ? (isListening ? 'Stop dictation' : 'Dictate with microphone') : 'Speech recognition is not supported in this browser'}
+                onClick={() => setIsVoiceModalOpen(true)}
+                className="p-2 rounded-xl mr-1 text-zinc-400 hover:text-white hover:bg-white/5 border border-transparent transition-colors"
+                title="Voice (runs locally)"
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
                 </svg>
               </button>
 
-              {/* Local Voice Assistant Button */}
-              <button
-                type="button"
-                onClick={() => setIsVoiceModalOpen(true)}
-                className="p-2 text-purple-300 hover:text-white transition-all rounded-xl hover:bg-purple-600/20 mr-1 border border-purple-500/30 hover:border-purple-400/60 bg-gradient-to-tr from-purple-950/40 to-indigo-950/40 shadow-sm"
-                title="Launch Local Voice Assistant (faster-whisper + llama3.2 + pyttsx3)"
-              >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-                </svg>
-              </button>
-              
               {/* Send Button */}
               <button 
                 type="submit"
@@ -823,9 +778,9 @@ export default function Chat() {
             <span className="text-zinc-700">•</span>
             <button
               onClick={() => setIsVoiceModalOpen(true)}
-              className="text-[11px] text-purple-400 hover:text-purple-300 font-medium transition-colors inline-flex items-center gap-1"
+              className="text-[11px] text-zinc-400 hover:text-zinc-200 font-medium transition-colors"
             >
-              <span>🎙️ Try Voice Mode</span>
+              Voice
             </button>
           </div>
         </div>
