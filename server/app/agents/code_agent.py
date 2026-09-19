@@ -5,7 +5,7 @@ from typing import Callable
 import httpx
 
 from ..core.config import (
-    OLLAMA_URL, OLLAMA_CODE_MODEL, CODE_LLM_REVIEW, CODE_NUM_PREDICT, MAX_CONTINUATIONS,
+    OLLAMA_URL, OLLAMA_CODE_MODEL, CODE_LLM_REVIEW, CODE_NUM_PREDICT, MAX_CONTINUATIONS, get_ollama_options,
 )
 from ..utils.completion_guard import is_truncated, close_unbalanced_fences
 from ..utils.code_validation import quick_validate_code
@@ -187,7 +187,7 @@ class CodeAgent(BaseAgent):
                         "model": OLLAMA_CODE_MODEL,
                         "stream": True,
                         "messages": convo,
-                        "options": {"temperature": 0.2, "top_p": 0.9, "num_predict": CODE_NUM_PREDICT},
+                        "options": get_ollama_options({"temperature": 0.2, "top_p": 0.9, "num_predict": CODE_NUM_PREDICT}),
                     },
                 ) as res:
                     if res.status_code >= 400:
@@ -215,21 +215,24 @@ class CodeAgent(BaseAgent):
         return close_unbalanced_fences(answer)
 
     async def _fix(self, system_prompt: str, answer: str, issues: list[str]):
-        async with httpx.AsyncClient(timeout=180) as client:
-            res = await client.post(
-                f"{OLLAMA_URL}/api/chat",
-                json={
-                    "model": OLLAMA_CODE_MODEL,
-                    "stream": False,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": _build_fix_prompt(answer, issues)},
-                    ],
-                    "options": {"temperature": 0.2, "top_p": 0.9, "num_predict": CODE_NUM_PREDICT},
-                },
-            )
-            if res.status_code >= 400:
-                return None
-            data = res.json()
-            fixed = (data.get("message") or {}).get("content", "")
-            return close_unbalanced_fences(fixed) if fixed else None
+        try:
+            async with httpx.AsyncClient(timeout=180) as client:
+                res = await client.post(
+                    f"{OLLAMA_URL}/api/chat",
+                    json={
+                        "model": OLLAMA_CODE_MODEL,
+                        "stream": False,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": _build_fix_prompt(answer, issues)},
+                        ],
+                        "options": get_ollama_options({"temperature": 0.2, "top_p": 0.9, "num_predict": CODE_NUM_PREDICT}),
+                    },
+                )
+                if res.status_code >= 400:
+                    return None
+                data = res.json()
+                fixed = (data.get("message") or {}).get("content", "")
+                return close_unbalanced_fences(fixed) if fixed else None
+        except Exception:
+            return None

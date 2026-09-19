@@ -1,3 +1,4 @@
+import uuid
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -29,9 +30,10 @@ async def list_chats():
 
 @router.post("/api/chats", status_code=201)
 async def create_chat(body: CreateChatBody):
+    chat_id = str(uuid.uuid4())
     result = await db.query(
-        "INSERT INTO chats (user_id, title) VALUES ($1, $2) RETURNING *",
-        [DEFAULT_USER_ID, body.title or "New Chat"],
+        "INSERT INTO chats (id, user_id, title) VALUES ($1, $2, $3) RETURNING *",
+        [chat_id, DEFAULT_USER_ID, body.title or "New Chat"],
     )
     return result["rows"][0]
 

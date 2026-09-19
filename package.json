@@ -1,5 +1,6 @@
 {
   "name": "nova-ai",
+  "description": "Agentic AI platform for autonomous multi-agent orchestration, retrieval-augmented reasoning, and workflow automation.",
   "private": true,
   "version": "0.0.0",
   "type": "module",

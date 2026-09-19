@@ -48,6 +48,14 @@ async def auth_and_rate_limit_stub(request: Request, call_next):
     return await call_next(request)
 
 
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+try:
+    from rag_api.main import router as rag_router
+    app.include_router(rag_router, prefix="/rag")
+except Exception as err:
+    logger.warn("Failed to import rag_api router into main app", {"error": str(err)})
+
 app.include_router(chats.router)
 app.include_router(upload.router)
 app.include_router(query.router)

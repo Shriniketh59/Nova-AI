@@ -1,112 +1,81 @@
-# React + Vite
+# Nova AI
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+## Agentic AI Platform for Autonomous Collaboration and Intelligent Workflows
 
-Currently, two official plugins are available:
+Nova AI is a professional-grade agentic platform designed to coordinate autonomous AI agents, manage contextual memory, and orchestrate complex workflows with retrieval-augmented intelligence.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+This repository combines a modern frontend experience with a Python backend to deliver a scalable architecture for multi-agent reasoning, task execution, and knowledge-driven automation.
 
-## React Compiler
+## Core Capabilities
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- Autonomous multi-agent orchestration
+- Retrieval-Augmented Generation (RAG) workflows
+- Contextual memory and session management
+- Tool calling and function execution
+- Workflow planning and intelligent routing
+- Modular architecture for extensibility
 
-## Expanding the ESLint configuration
+## Architecture Overview
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Nova AI is built using a layered architecture that includes:
 
-# 🚀 Nova AI
+- Supervisor Agent: orchestrates workflows and agent collaboration
+- Specialized Agents: execute domain-specific tasks and reasoning
+- Memory Layer: preserves context and knowledge across sessions
+- Retrieval Layer: enables source-aware search and document grounding
+- Frontend Interface: delivers an interactive React-based user experience
 
-### Agentic AI Platform for Autonomous Multi-Agent Collaboration
-
-Nova AI is an advanced Agentic AI platform designed to enable autonomous agents to reason, plan, collaborate, and execute complex workflows. The platform leverages Large Language Models (LLMs), memory systems, retrieval mechanisms, and intelligent orchestration to automate tasks and enhance decision-making.
-
-## 🎯 Vision
-
-To build a scalable Agentic AI ecosystem where specialized AI agents work together to solve real-world problems, automate workflows, and deliver intelligent assistance across multiple domains.
-
-## ✨ Features
-
-* Multi-Agent Architecture
-* Autonomous Task Execution
-* Agent Orchestration & Routing
-* Context & Memory Management
-* Retrieval-Augmented Generation (RAG)
-* Tool Calling & Function Execution
-* Intelligent Workflow Automation
-* Real-Time Decision Making
-* Scalable and Modular Design
-
-## 🏗️ Architecture
-
-Nova AI follows an Agentic AI architecture consisting of:
-
-* Supervisor Agent – Coordinates workflows and agent communication
-* Specialized Agents – Handle domain-specific tasks
-* Memory Layer – Maintains context and knowledge
-* Tool Layer – Enables external integrations and actions
-* LLM Engine – Provides reasoning and language understanding
-* User Interface – Delivers an interactive user experience
-
-## 🛠️ Technology Stack
+## Technology Stack
 
 ### Frontend
-
-* React.js
-* TypeScript
-* Tailwind CSS
+- React
+- Vite
+- Tailwind CSS
 
 ### Backend
+- Python
+- FastAPI / Flask
+- RESTful APIs
 
-* Python
-* FastAPI / Flask
-* REST APIs
+### AI and Data
+- Large Language Models (LLMs)
+- Retrieval-Augmented Generation
+- Prompt engineering
+- Multi-agent automation
 
-### AI & Machine Learning
-
-* Large Language Models (LLMs)
-* Generative AI
-* Prompt Engineering
-* Multi-Agent Systems
-* RAG Pipelines
-
-### Infrastructure
-
-* Git & GitHub
-* Cloud Computing
-* Docker (Planned)
-
-## 📂 Project Structure
+## Project Structure
 
 ```text
-Nova-AI/
-├── src/
-├── server/
-├── public/
-├── components/
-├── services/
-├── docs/
-├── ARCHITECTURE.md
-└── README.md
+Nova AI/
+├── server/              # Backend services, APIs, and agent orchestration
+├── src/                 # Frontend application code
+├── public/              # Static assets
+├── ARCHITECTURE.md      # Architecture and design documentation
+├── README.md            # Project overview and guidance
+└── package.json         # Frontend metadata and scripts
 ```
 
-## 🎯 Future Roadmap
+## Development Status
 
-* Voice-Based Agent Interaction
-* Advanced Memory Systems
-* Multi-Modal AI Support
-* Enterprise Workflow Automation
-* Cloud-Native Deployment
-* Agent Marketplace
+This project is actively under development, with current emphasis on enhancing agent coordination, knowledge retrieval, and workflow automation.
 
-## 📈 Project Status
+## Getting Started
 
-Currently under active development with a focus on Agent Orchestration, Memory Management, and Workflow Automation.
+1. Install frontend dependencies: `npm install`
+2. Start the frontend: `npm run dev`
+3. Explore backend services in `server/`
 
-## 👨‍💻 Author
+## Roadmap
+
+- Advanced memory and context handling
+- Expanded multi-agent orchestration
+- Multi-modal AI support
+- Cloud-native deployment readiness
+
+## Author
 
 Shri Niketh R
 
 B.Tech Artificial Intelligence & Data Analytics
 
-Passionate about Agentic AI, Generative AI, Cloud Computing, and Building Intelligent Systems.
+Focused on building scalable AI systems and intelligent automation solutions.

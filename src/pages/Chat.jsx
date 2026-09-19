@@ -45,12 +45,11 @@ export default function Chat() {
   const [input, setInput] = useState('');
   const [attachment, setAttachment] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
   
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
-  // Set right before navigate() when a chat is created from a send-in-progress.
-  // Skips the next chatId-driven reload so it doesn't wipe the in-flight
-  // streaming placeholder with an empty messages list from the backend.
+  const abortControllerRef = useRef(null);
   const skipNextLoadRef = useRef(false);
 
   const scrollToBottom = () => {
@@ -189,6 +188,9 @@ export default function Chat() {
     // long/code answers, so the old 65s client timeout fired on healthy responses.
     const useDeepPipeline = isComplexPrompt(userInput);
     const controller = new AbortController();
+    abortControllerRef.current = controller;
+    setIsGenerating(true);
+
     const timeoutId = setTimeout(() => controller.abort(), useDeepPipeline ? 240000 : 185000);
 
     try {
@@ -228,18 +230,12 @@ export default function Chat() {
             try {
               data = JSON.parse(dataStr);
             } catch {
-              // Ignore partial chunk JSON parsing errors
               continue;
             }
             if (data.error) {
               throw new Error(data.error);
             }
             {
-              // Stage-progress events ({stage, stageLabel}) arrive while the
-              // pipeline is still working — update the "Thinking..." label
-              // instead of leaving it static for minutes. The final event
-              // carries the complete answer (no incremental tokens — the
-              // answer doesn't exist until reasoning+review finish).
               if (data.stage) {
                 setMessages(prev => {
                   const updated = [...prev];
@@ -283,23 +279,32 @@ export default function Chat() {
 
     } catch (error) {
       console.error('Chat request failed:', error);
-      const message = error.name === 'AbortError'
-        ? 'Response timed out. Please try again.'
-        : (error.message || 'Unknown error');
       setMessages(prev => {
         const updated = [...prev];
-        if (updated[updated.length - 1]) {
-          updated[updated.length - 1] = {
-            role: 'ai',
-            content: `❌ ${message}`
-          };
+        const last = updated[updated.length - 1];
+        if (error.name === 'AbortError') {
+          if (last) {
+            updated[updated.length - 1] = {
+              ...last,
+              content: last.content || '⏹ Generation stopped.',
+              isStreaming: false,
+              isThinking: false
+            };
+          }
+        } else {
+          if (last) {
+            updated[updated.length - 1] = {
+              role: 'ai',
+              content: `❌ ${error.message || 'Unknown error'}`
+            };
+          }
         }
         return updated;
       });
     } finally {
-      // Always clear the timer and ensure no message is left stuck on
-      // "Thinking..." — covers success, error, and timeout/abort paths.
       clearTimeout(timeoutId);
+      setIsGenerating(false);
+      abortControllerRef.current = null;
       setMessages(prev => {
         const updated = [...prev];
         const last = updated[updated.length - 1];
@@ -309,6 +314,14 @@ export default function Chat() {
         return updated;
       });
     }
+  };
+
+  const handleStopGeneration = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsGenerating(false);
   };
 
   const QuickActionButton = ({ icon: Icon, label }) => (
@@ -528,26 +541,40 @@ export default function Chat() {
 
             <div className="flex items-center p-2 m-1">
               {/* Voice Placeholder */}
-              <button 
-                type="button" 
-                className="p-2 text-zinc-400 hover:text-white transition-colors rounded-xl hover:bg-white/5 mr-1"
-                title="Voice input"
-              >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-                </svg>
-              </button>
+              {!isGenerating && (
+                <button 
+                  type="button" 
+                  className="p-2 text-zinc-400 hover:text-white transition-colors rounded-xl hover:bg-white/5 mr-1"
+                  title="Voice input"
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                  </svg>
+                </button>
+              )}
               
-              {/* Send Button */}
-              <button 
-                type="submit"
-                disabled={(!input.trim() && !attachment) || isUploading}
-                className="p-2 rounded-xl bg-white text-black disabled:opacity-30 disabled:bg-zinc-700 disabled:text-zinc-500 transition-colors"
-              >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18" />
-                </svg>
-              </button>
+              {/* Send or Stop Button */}
+              {isGenerating ? (
+                <button 
+                  type="button"
+                  onClick={handleStopGeneration}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30 text-xs font-semibold transition-all shadow-md active:scale-95"
+                  title="Stop generating"
+                >
+                  <span className="w-2.5 h-2.5 rounded-sm bg-red-400"></span>
+                  <span>Stop</span>
+                </button>
+              ) : (
+                <button 
+                  type="submit"
+                  disabled={(!input.trim() && !attachment) || isUploading}
+                  className="p-2 rounded-xl bg-white text-black disabled:opacity-30 disabled:bg-zinc-700 disabled:text-zinc-500 transition-colors"
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18" />
+                  </svg>
+                </button>
+              )}
             </div>
           </form>
           <div className="text-center mt-3">

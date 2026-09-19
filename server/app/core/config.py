@@ -18,15 +18,27 @@ PORT = _int("PORT", 5001)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:1.5b")
 OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "all-minilm")
 OLLAMA_CODE_MODEL = os.environ.get("OLLAMA_CODE_MODEL") or OLLAMA_MODEL
+OLLAMA_NUM_THREAD = _int("OLLAMA_NUM_THREAD", os.cpu_count() or 4)
+
+
+def get_ollama_options(extra_options: dict | None = None) -> dict:
+    opts = {
+        "num_gpu": 0,
+        "num_thread": OLLAMA_NUM_THREAD,
+    }
+    if extra_options:
+        opts.update(extra_options)
+    return opts
+
 
 CODE_LLM_REVIEW = os.environ.get("CODE_LLM_REVIEW", "false").lower() == "true"
-CODE_NUM_PREDICT = _int("CODE_NUM_PREDICT", 2048)
-MAX_CONTINUATIONS = _int("MAX_CONTINUATIONS", 3)
+CODE_NUM_PREDICT = _int("CODE_NUM_PREDICT", 512)
+MAX_CONTINUATIONS = _int("MAX_CONTINUATIONS", 2)
 
-RAG_API_URL = os.environ.get("RAG_API_URL", "http://127.0.0.1:8008")
+RAG_API_URL = os.environ.get("RAG_API_URL", "http://127.0.0.1:5001/rag")
 RAG_TOP_K = _int("RAG_TOP_K", 8)
 RAG_SIMILARITY_THRESHOLD = float(os.environ.get("RAG_SIMILARITY_THRESHOLD", 0.25))
 RAG_MAX_CONTEXT_CHARS = _int("RAG_MAX_CONTEXT_CHARS", 6000)
@@ -43,3 +55,4 @@ VECTOR_STORE_BACKEND = os.environ.get("VECTOR_STORE_BACKEND", "qdrant").lower()
 DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000000"
 
 NODE_ENV = os.environ.get("NODE_ENV", "development")
+

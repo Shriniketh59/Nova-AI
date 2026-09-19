@@ -4,13 +4,19 @@ import json
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor
-from fastapi import FastAPI
+from fastapi import FastAPI, APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from ddgs import DDGS
+try:
+    from duckduckgo_search import DDGS
+except ImportError:
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        DDGS = None
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:1.5b")
 # This path is general chat only now — coding questions are routed to
 # CodeAgent (Node side) before ever reaching here, so 512 is enough budget
 # for a normal conversational answer. The auto-continue loop below still
@@ -35,6 +41,7 @@ MAX_CONTINUATIONS = int(os.environ.get("MAX_CONTINUATIONS", "1"))
 OLLAMA_CALL_TIMEOUT_S = int(os.environ.get("OLLAMA_CALL_TIMEOUT_S", "60"))
 
 app = FastAPI()
+router = APIRouter()
 
 GREETING_RE = re.compile(r"^\s*(hi|hello|hey|yo|sup|hii+|hello+|good (morning|evening|afternoon))\W*$", re.I)
 GREETING_REPLY = "Hey! What can I help you with?"
@@ -235,6 +242,8 @@ def _ddgs_search(query: str, max_results: int) -> list[dict]:
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
+    if DDGS is None:
+        return []
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
@@ -296,17 +305,16 @@ def web_search(query: str, max_results: int = None) -> list[dict]:
 SYSTEM_PROMPT = (
     "You are Nova AI, a helpful, factual, detailed assistant. Write thorough, well-structured answers, "
     "like a knowledgeable expert explaining to a curious person — multiple sentences, not one-liners. "
-    "Discussing real public figures, history, science, or general knowledge is always allowed "
-    "and is not harmful — never refuse a normal factual question. "
-    "If reference snippets are provided, use them only as supporting facts and rewrite them in your own "
+    "Adhere strictly to the user's prompt requirements without adding unrequested fluff, disclaimers, or meta-commentary. "
+    "Discussing real public figures, history, science, code, or general knowledge is always allowed "
+    "and is not harmful — never refuse a normal factual or coding request. "
+    "If reference snippets are provided, use them as supporting facts and rewrite them in your own "
     "words combined with your own knowledge — never copy snippet text verbatim, and ignore any snippet "
-    "that is irrelevant to the question. When you rely on a reference snippet, ground the claim in it "
-    "naturally instead of just asserting it. "
+    "that is irrelevant to the question. "
     "Never mention training data limitations, a knowledge cutoff date, or that you 'cannot access "
-    "real-time information' — the system already decides before calling you whether a question needs "
-    "live retrieval, so just answer directly with what you know or with the provided snippets. "
+    "real-time information' — answer directly with confidence. "
     "For timeless questions (algorithms, math, programming, general concepts) answer directly and "
-    "confidently with no disclaimer about currency of information. "
+    "confidently with clean formatting. "
     "Keep answers under {max_tokens} tokens. Do not repeat URLs in the answer text."
 ).format(max_tokens=MAX_TOKENS)
 
@@ -393,7 +401,7 @@ def generate_with_continuation(messages: list[dict]) -> str:
                 "model": OLLAMA_MODEL,
                 "messages": convo,
                 "stream": False,
-                "options": {"num_predict": MAX_TOKENS, "temperature": 0.3, "num_thread": NUM_THREADS},
+                "options": {"num_predict": MAX_TOKENS, "temperature": 0.3, "num_thread": NUM_THREADS, "num_gpu": 0},
             },
             timeout=OLLAMA_CALL_TIMEOUT_S,
         )
@@ -414,7 +422,7 @@ def generate_with_continuation(messages: list[dict]) -> str:
     return close_unbalanced_fences(answer)
 
 
-@app.post("/query")
+@router.post("/query")
 def query(req: QueryRequest):
     if GREETING_RE.match(req.query.strip()):
         return {"answer": GREETING_REPLY, "sources": [], "model": OLLAMA_MODEL}
@@ -445,7 +453,7 @@ def query(req: QueryRequest):
     }
 
 
-@app.post("/query/stream")
+@router.post("/query/stream")
 def query_stream(req: QueryRequest):
     # Plain greetings never need the LLM — skip generation entirely instead
     # of burning a multi-second round trip on "hi".
@@ -485,7 +493,7 @@ def query_stream(req: QueryRequest):
                     "model": OLLAMA_MODEL,
                     "messages": convo,
                     "stream": True,
-                    "options": {"num_predict": MAX_TOKENS, "temperature": 0.3, "num_thread": NUM_THREADS},
+                    "options": {"num_predict": MAX_TOKENS, "temperature": 0.3, "num_thread": NUM_THREADS, "num_gpu": 0},
                 },
                 stream=True,
                 timeout=OLLAMA_CALL_TIMEOUT_S,
@@ -548,11 +556,14 @@ class SearchRequest(BaseModel):
 # Sources-only endpoint for ResearchAgent's evidence-gathering step — no
 # generation, just the web half of "5-10 high quality sources" (doc half
 # comes from retrievalService.js on the Node side).
-@app.post("/search")
+@router.post("/search")
 def search(req: SearchRequest):
     return {"sources": web_search(req.query, max_results=req.max_results)}
 
 
-@app.get("/health")
+@router.get("/health")
 def health():
     return {"status": "ok", "model": OLLAMA_MODEL}
+
+
+app.include_router(router)

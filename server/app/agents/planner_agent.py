@@ -3,7 +3,7 @@ import re
 
 import httpx
 
-from ..core.config import OLLAMA_URL, OLLAMA_MODEL
+from ..core.config import OLLAMA_URL, OLLAMA_MODEL, get_ollama_options
 from ..services.task_router import classify_topic
 from .base_agent import BaseAgent
 
@@ -96,7 +96,7 @@ class PlannerAgent(BaseAgent):
                     json={
                         "model": OLLAMA_MODEL,
                         "stream": False,
-                        "options": {"temperature": 0.1},
+                        "options": get_ollama_options({"temperature": 0.1}),
                         "messages": [
                             {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
                             {"role": "user", "content": question},

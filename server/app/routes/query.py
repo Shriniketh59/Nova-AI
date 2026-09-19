@@ -15,7 +15,7 @@ from ..agents.memory_agent import memory_agent
 from ..agents.resume_analysis_agent import ResumeAnalysisAgent
 from ..agents.vision_agent import VisionAgent
 from ..core import db
-from ..core.config import DEFAULT_USER_ID, RAG_API_URL
+from ..core.config import DEFAULT_USER_ID, RAG_API_URL, OLLAMA_URL, OLLAMA_MODEL, get_ollama_options
 from ..core.logger import logger
 from ..rag import fetch_chunks_for_chat, fetch_images_for_chat
 from ..retrieval.complexity import tier_for
@@ -167,7 +167,7 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
             tier = tier_for(query)
             retrieval_result = await retrieve(query, chat_id, top_k=tier["topK"])
             memories = await memory_agent.get_relevant_memories(chat_id, query, user_msg["id"], 3)
-            conversation_context = await get_conversation_context(chat_id)
+            conversation_context = await get_conversation_context(chat_id, query=query)
 
             context_blocks = []
             if retrieval_result["contextText"]:
@@ -184,34 +184,59 @@ async def chat_query(chat_id: str, body: ChatQueryBody):
 
             accumulated_text = ""
             sources = []
-            async with httpx.AsyncClient(timeout=180) as client:
-                async with client.stream(
-                    "POST",
-                    f"{RAG_API_URL}/query/stream",
-                    json={"query": query, "context": context_text, "web_search": use_web_search},
-                ) as rag_res:
-                    if rag_res.status_code >= 400:
-                        raise RuntimeError(f"RAG API error: {rag_res.status_code}")
+            try:
+                async with httpx.AsyncClient(timeout=180) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{RAG_API_URL}/query/stream",
+                        json={"query": query, "context": context_text, "web_search": use_web_search},
+                    ) as rag_res:
+                        if rag_res.status_code >= 400:
+                            raise RuntimeError(f"RAG API error: {rag_res.status_code}")
 
-                    async for line in rag_res.aiter_lines():
-                        if not line.strip():
-                            continue
-                        try:
-                            data = json.loads(line)
-                        except Exception:
-                            continue
-                        if data.get("sources"):
-                            sources = data["sources"]
-                            yield _sse({"text": "", "sources": sources})
-                        if data.get("token"):
-                            accumulated_text += data["token"]
-                            yield _sse({"text": accumulated_text, "sources": sources})
-                        if data.get("replace") is not None:
-                            # rag_api caught its own answer contradicting a
-                            # knowledge-cutoff statement mid-stream and sent a
-                            # corrected full answer to replace it with.
-                            accumulated_text = data["replace"]
-                            yield _sse({"text": accumulated_text, "sources": sources})
+                        async for line in rag_res.aiter_lines():
+                            if not line.strip():
+                                continue
+                            try:
+                                data = json.loads(line)
+                            except Exception:
+                                continue
+                            if data.get("sources"):
+                                sources = data["sources"]
+                                yield _sse({"text": "", "sources": sources})
+                            if data.get("token"):
+                                accumulated_text += data["token"]
+                                yield _sse({"text": accumulated_text, "sources": sources})
+                            if data.get("replace") is not None:
+                                accumulated_text = data["replace"]
+                                yield _sse({"text": accumulated_text, "sources": sources})
+            except Exception as rag_err:
+                logger.warn(f"RAG API stream unavailable ({rag_err}), streaming directly from Ollama")
+                async with httpx.AsyncClient(timeout=180) as client:
+                    sys_prompt = f"You are Nova AI assistant. Answer accurately based on context.\n{context_text}" if context_text else "You are Nova AI assistant. Answer clearly and accurately."
+                    convo = [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": query},
+                    ]
+                    async with client.stream(
+                        "POST",
+                        f"{OLLAMA_URL}/api/chat",
+                        json={
+                            "model": OLLAMA_MODEL,
+                            "stream": True,
+                            "messages": convo,
+                            "options": get_ollama_options({"temperature": 0.3, "num_predict": 512}),
+                        },
+                    ) as o_res:
+                        if o_res.status_code < 400:
+                            async for line in o_res.aiter_lines():
+                                if not line.strip():
+                                    continue
+                                chunk = json.loads(line)
+                                token = (chunk.get("message") or {}).get("content", "")
+                                if token:
+                                    accumulated_text += token
+                                    yield _sse({"text": accumulated_text, "sources": sources})
 
             web_source_cards = [{**s, "type": "web"} for s in sources]
             all_source_cards = [*retrieval_result["sources"], *web_source_cards]

@@ -3,7 +3,7 @@ import re
 
 import httpx
 
-from ..core.config import OLLAMA_URL, OLLAMA_MODEL
+from ..core.config import OLLAMA_URL, OLLAMA_MODEL, get_ollama_options
 from ..rag import cosine_similarity
 from .base_agent import BaseAgent
 
@@ -145,7 +145,7 @@ class ReviewAgent(BaseAgent):
                     json={
                         "model": OLLAMA_MODEL,
                         "stream": False,
-                        "options": {"temperature": 0.1},
+                        "options": get_ollama_options({"temperature": 0.1}),
                         "messages": [
                             {"role": "system", "content": CODE_CRITIQUE_SYSTEM_PROMPT if is_code else CRITIQUE_SYSTEM_PROMPT},
                             {"role": "user", "content": user_content},
