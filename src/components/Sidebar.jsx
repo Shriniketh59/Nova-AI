@@ -1,13 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { NavLink, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { useTheme } from '../context/ThemeContext';
 import { relativeTime } from '../utils/time';
 import { csrfHeaders } from '../utils/csrf';
 
 export default function Sidebar({ onLogout, mobileOpen = false, onCloseMobile }) {
   const { user, logout } = useAuth();
-  const { theme, toggleTheme } = useTheme();
   const [chatHistory, setChatHistory] = useState([]);
   const [search, setSearch] = useState('');
   const [avatarFailed, setAvatarFailed] = useState(false);
@@ -153,48 +151,8 @@ export default function Sidebar({ onLogout, mobileOpen = false, onCloseMobile })
         )}
       </div>
 
-      {/* Bottom area: User & Settings */}
+      {/* Bottom area: User */}
       <div className="p-3 flex flex-col space-y-1 mt-auto">
-        <NavLink
-          to="/coach"
-          onClick={() => onCloseMobile?.()}
-          className="flex items-center space-x-3 w-full hover:bg-white/5 text-zinc-300 px-3 py-2.5 rounded-lg text-sm transition-colors"
-        >
-          <svg className="w-4 h-4 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L4.5 12l5.25-5m4.5 0L19.5 12l-5.25 5" />
-          </svg>
-          <span>Interview Coach</span>
-        </NavLink>
-
-        <NavLink
-          to="/settings"
-          onClick={() => onCloseMobile?.()}
-          className="flex items-center space-x-3 w-full hover:bg-white/5 text-zinc-300 px-3 py-2.5 rounded-lg text-sm transition-colors"
-        >
-          <svg className="w-4 h-4 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          </svg>
-          <span>Settings</span>
-        </NavLink>
-
-        <button
-          type="button"
-          onClick={toggleTheme}
-          className="flex items-center space-x-3 w-full hover:bg-white/5 text-zinc-300 px-3 py-2.5 rounded-lg text-sm transition-colors"
-        >
-          {theme === 'dark' ? (
-            <svg className="w-4 h-4 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-            </svg>
-          ) : (
-            <svg className="w-4 h-4 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-            </svg>
-          )}
-          <span>{theme === 'dark' ? 'Light mode' : 'Dark mode'}</span>
-        </button>
-
         <div
           className="flex items-center space-x-3 px-3 py-2 mt-1 rounded-lg hover:bg-white/5 cursor-pointer transition-colors group"
           onClick={handleLogout}

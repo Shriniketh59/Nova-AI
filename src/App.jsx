@@ -3,11 +3,9 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
 import RootLayout from './layouts/RootLayout';
 import Chat from './pages/Chat';
-import Settings from './pages/Settings';
 import Login from './pages/Login';
 import SignUp from './pages/SignUp';
 import ForgotPassword from './pages/ForgotPassword';
-import Coach from './pages/Coach';
 
 function ProtectedRoute({ children }) {
   const { isAuthenticated, loading } = useAuth();
@@ -50,8 +48,6 @@ function AppRoutes() {
       >
         <Route index element={<Chat />} />
         <Route path="chat/:chatId" element={<Chat />} />
-        <Route path="settings" element={<Settings />} />
-        <Route path="coach" element={<Coach />} />
       </Route>
 
       {/* Fallback */}
