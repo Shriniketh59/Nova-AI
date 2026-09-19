@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import Editor from '@monaco-editor/react';
 import MessageContent from '../components/MessageContent';
+import { csrfHeaders } from '../utils/csrf';
 
 const CATEGORIES = ['arrays', 'strings', 'dynamic programming', 'graphs', 'trees', 'linked lists', 'sorting', 'searching'];
 const DIFFICULTIES = ['easy', 'medium', 'hard'];
@@ -48,7 +49,7 @@ export default function Coach() {
     try {
       const res = await fetch('/api/coach/problems', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: csrfHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ category, difficulty }),
       });
       if (res.ok) {
@@ -86,7 +87,7 @@ export default function Coach() {
     try {
       const res = await fetch(`/api/coach/sessions/${sessionId}/submit`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: csrfHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ code, language }),
       });
       if (res.ok) {

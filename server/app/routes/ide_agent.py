@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..agents.code_agent import CodeAgent
 from ..agents.planner_agent import PlannerAgent
 from ..agents.review_agent import ReviewAgent
+from ..middleware.auth_middleware import get_current_user
 
 router = APIRouter()
 code_agent = CodeAgent()
@@ -17,7 +18,7 @@ class IdeAgentBody(BaseModel):
 
 
 @router.post("/api/ide/agent")
-async def ide_agent(body: IdeAgentBody):
+async def ide_agent(body: IdeAgentBody, current_user: dict = Depends(get_current_user)):
     if not body.agent or not body.input:
         raise HTTPException(status_code=400, detail="agent and input are required")
 

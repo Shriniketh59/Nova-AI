@@ -55,6 +55,14 @@ JWT_SECRET = os.environ.get("JWT_SECRET", "nova-ai-jwt-super-secret-key-change-i
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRES_DAYS = _int("JWT_EXPIRES_DAYS", 30)
 AUTH_COOKIE_NAME = "nova_session"
+CSRF_COOKIE_NAME = "csrf_token"
+
+# Whether auth/CSRF cookies get the `Secure` flag (HTTPS-only). Cookies with
+# Secure set are silently dropped by browsers over plain HTTP, so this
+# defaults to False for local dev and turns on automatically in production,
+# or can be forced via COOKIE_SECURE=true (e.g. HTTPS behind a proxy in a
+# non-"production" NODE_ENV).
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "").lower() == "true" or os.environ.get("NODE_ENV", "development") == "production"
 
 # Google OAuth Settings
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")

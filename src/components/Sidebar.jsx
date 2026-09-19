@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { NavLink, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { csrfHeaders } from '../utils/csrf';
 
 export default function Sidebar({ onLogout }) {
   const { user, logout } = useAuth();
@@ -83,7 +84,8 @@ export default function Sidebar({ onLogout }) {
                   if (confirm(`Delete chat "${chat.title}"?`)) {
                     try {
                       const res = await fetch(`/api/chats/${chat.id}`, {
-                        method: 'DELETE'
+                        method: 'DELETE',
+                        headers: csrfHeaders(),
                       });
                       if (res.ok) {
                         fetchChats();

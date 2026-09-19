@@ -5,6 +5,7 @@ import SourceCard from '../components/SourceCard';
 import DocumentCard from '../components/DocumentCard';
 import ImageAnalysisPanel from '../components/ImageAnalysisPanel';
 import VoiceAssistantModal from '../components/VoiceAssistantModal';
+import { csrfHeaders } from '../utils/csrf';
 
 // Cheap heuristic, no LLM call — keeps the fast path actually fast. Routes
 // comparisons/analysis/long multi-part questions to the deep critical-thinking
@@ -102,6 +103,7 @@ export default function Chat() {
 
       const res = await fetch('/api/upload', {
         method: 'POST',
+        headers: csrfHeaders(),
         body: formData
       });
 
@@ -148,7 +150,7 @@ export default function Chat() {
       try {
         const res = await fetch('/api/chats', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: csrfHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ title: input.substring(0, 40) || 'New Chat' })
         });
         if (res.ok) {
@@ -198,7 +200,7 @@ export default function Chat() {
       // 2. Fetch the streaming response — deep pipeline or fast single-shot
       const response = await fetch(useDeepPipeline ? '/api/agent/chat' : `/api/chats/${activeId}/query`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: csrfHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(useDeepPipeline
           ? { chatId: activeId, message: userInput }
           : { query: userInput, fileId: userAttachment?.id || null }),
