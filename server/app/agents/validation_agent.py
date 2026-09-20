@@ -47,6 +47,44 @@ Reply with ONLY a JSON object:
 
 _JSON_OBJ_RE = re.compile(r"\{[\s\S]*\}")
 
+NO_EVIDENCE_PREFIX = "No external evidence found"
+
+# Lightweight (non-LLM) grounding check: pull out name-like tokens, dates, and
+# numbers asserted in the answer and verify a reasonable share of them
+# actually appear somewhere in the evidence text. This catches answers that
+# state specific offices/names/dates the retrieved evidence never mentioned,
+# without a second LLM call.
+_CAPITALIZED_RE = re.compile(r"\b[A-Z][a-zA-Z]{2,}\b")
+_NUMBER_RE = re.compile(r"\b\d{1,4}\b")
+_SENTENCE_STARTERS = {
+    "The", "This", "That", "These", "Those", "It", "In", "On", "At", "For", "With",
+    "As", "However", "Additionally", "Overall", "According", "Based", "Note",
+    "Direct", "Answer", "Detailed", "Explanation", "Key", "Findings", "Conclusion",
+    "A", "An", "If", "So", "But", "And", "Question",
+}
+MIN_GROUNDING_RATIO = 0.4
+MIN_CLAIM_TOKENS_TO_CHECK = 2
+
+
+def _extract_claim_tokens(text: str) -> set[str]:
+    tokens = set(_CAPITALIZED_RE.findall(text or "")) - _SENTENCE_STARTERS
+    tokens |= set(_NUMBER_RE.findall(text or ""))
+    return tokens
+
+
+def _grounding_ratio(answer: str, evidence_summary: str) -> tuple[float, int]:
+    """Returns (fraction of answer's claim-tokens found in the evidence, total claim-tokens checked)."""
+    claim_tokens = _extract_claim_tokens(answer)
+    if len(claim_tokens) < MIN_CLAIM_TOKENS_TO_CHECK:
+        return 1.0, len(claim_tokens)
+    evidence_lower = (evidence_summary or "").lower()
+    present = sum(1 for t in claim_tokens if t.lower() in evidence_lower)
+    return present / len(claim_tokens), len(claim_tokens)
+
+
+def _no_evidence(evidence_summary: str) -> bool:
+    return not evidence_summary or evidence_summary.strip().startswith(NO_EVIDENCE_PREFIX)
+
 
 def _parse_critique(raw: str) -> dict:
     fallback = {"pass": True, "issues": [], "needsMoreEvidence": False, "confidenceScore": 50, "confidenceReason": "Could not parse review output"}
@@ -130,12 +168,31 @@ class ValidationAgent(BaseAgent):
         contradictions = contradictions or []
         is_code = domain == "code"
 
-        # Hard guard: with zero evidence, never let a factual answer come back
-        # as confident/authoritative — regardless of what the LLM judge (or its
-        # failure fallback) says.
-        no_evidence = (not is_code) and (
-            not evidence_summary or evidence_summary.strip() == "No external evidence found — answer must rely on general knowledge only."
-        )
+        # Fast heuristic gates — run before any LLM call, never block on them
+        # taking longer than a regex pass. Both cases get the same treatment
+        # as "no_evidence": low confidence + needsMoreEvidence, so ToolAgent's
+        # existing escalate-then-fail loop handles them without new plumbing.
+        if not is_code:
+            if _no_evidence(evidence_summary):
+                return {
+                    "pass": False,
+                    "issues": ["no_evidence: no external evidence was retrieved to support a factual claim"],
+                    "needsMoreEvidence": True,
+                    "confidenceScore": 15,
+                    "confidenceReason": "No evidence retrieved — claims cannot be verified.",
+                }
+            ratio, total_claims = _grounding_ratio(answer, evidence_summary)
+            if total_claims >= MIN_CLAIM_TOKENS_TO_CHECK and ratio < MIN_GROUNDING_RATIO:
+                return {
+                    "pass": False,
+                    "issues": [
+                        f"ungrounded_claims: only {ratio:.0%} of the names/dates/numbers asserted in the "
+                        f"answer appear in the retrieved evidence"
+                    ],
+                    "needsMoreEvidence": True,
+                    "confidenceScore": 20,
+                    "confidenceReason": f"Answer entities not well-supported by evidence ({ratio:.0%} grounded).",
+                }
 
         if is_code:
             user_content = f"Question: {question}\n\nCode answer to review:\n{answer}"
@@ -168,12 +225,13 @@ class ValidationAgent(BaseAgent):
         except Exception as err:
             result = {"pass": True, "issues": [], "needsMoreEvidence": False, "confidenceScore": 50, "confidenceReason": f"Review unavailable: {err}"}
 
-        if no_evidence:
-            result["needsMoreEvidence"] = True
-            result["pass"] = False
-            result["confidenceScore"] = min(result.get("confidenceScore", 0) or 0, 15)
-            result["confidenceReason"] = "No evidence (web or document) was retrieved for this factual query."
-            result.setdefault("issues", [])
-            result["issues"] = [*result["issues"], "No supporting evidence was found — answer cannot be presented as confident/authoritative."]
+        # Sources disagreeing shouldn't be silently blocked, but the answer
+        # must not read as confidently settled — surface it in the reasoning
+        # and cap confidence instead of failing the answer outright.
+        if not is_code and contradictions:
+            result["confidenceScore"] = min(result.get("confidenceScore", 50), 55)
+            disputed_note = "Sources disagree on key facts — treat as disputed/uncertain."
+            existing_reason = result.get("confidenceReason") or ""
+            result["confidenceReason"] = f"{existing_reason} {disputed_note}".strip()
 
         return result

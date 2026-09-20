@@ -31,12 +31,34 @@ GREETING_RE = re.compile(
     re.I,
 )
 
+# Political/public-office/organizational titles whose holder can change at any
+# time — a question about "who currently holds X" is never safe to answer
+# from model memory alone, even without an explicit "current"/"latest" cue.
+OFFICE_TITLES = (
+    r"ceo|cfo|coo|cto|chairman|chairperson|chair|leader|president|vice\s+president|"
+    r"vp|pm|prime\s+minister|cm|chief\s+minister|governor|mayor|senator|"
+    r"congress(wo)?man|mp|minister|secretary(\s+general)?|speaker|chancellor|"
+    r"monarch|king|queen|emperor|pope|premier|director\s+general|head\s+of\s+state|"
+    r"head\s+coach|coach|captain|commissioner|superintendent|principal|dean|"
+    r"ambassador|attorney\s+general|chief\s+justice"
+)
+
 # Questions that require live/current information from the web
 CURRENT_INFO_RE = re.compile(
     r"\b(latest|current(ly)?|today|right\s+now|this\s+(week|month|year)|"
     r"recent(ly)?|up[-\s]to[-\s]date|as\s+of\s+(now|today)|breaking\s+news|"
     r"live\s+score|stock\s+price|exchange\s+rate|weather|"
-    r"who\s+is\s+the\s+(current|new|ceo|leader|president|cm|chief\s+minister)|"
+    r"who\s+(is|was|are|were|'s)\s+(the\s+)?(current|new|" + OFFICE_TITLES + r")\b(\s+of\b)?|"
+    r"who\s+(is|are)\s+(the\s+)?(current|new)\b|"
+    r"who\s+won\s+(the\s+)?(election|championship|award|match|game|series|title|race|contest|primary|nomination)|"
+    r"election\s+(result|winner|outcome)s?|"
+    r"(won|winner\s+of)\s+the\s+(20\d{2}\s+)?election|"
+    r"when\s+(did|was|is|will)\s+.{0,60}?"
+    r"(happen|occur|start|end|begin|resign|step\s+down|retire|die|pass(ed)?\s+away|"
+    r"elected|appointed|sworn\s+in|inaugurated|announced|release[ds]?|launch(ed)?)\b|"
+    r"how\s+long\s+has\s+.{0,40}?\bbeen\b|"
+    r"since\s+when\s+(is|has|was)|"
+    r"still\s+(the\s+)?(" + OFFICE_TITLES + r")|"
     r"20(2[4-9]|3\d))\b",
     re.I,
 )

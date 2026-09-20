@@ -82,6 +82,11 @@ Think step by step before writing:
 3. If this is a comparison, weigh the options explicitly.
 4. State your conclusion clearly and directly.
 
+Ground rules — do not violate these:
+- Never guess, assume, or invent offices, names, dates, titles, statistics, or events that are not stated in the evidence above. If the evidence is silent on part of the question, say plainly: "I don't have verified information about <that part>" instead of filling the gap from general knowledge.
+- If web evidence and older/cached context disagree, the web evidence is the current, authoritative source — prefer it.
+- If the evidence above shows sources disagreeing with each other, say so explicitly and present it as unresolved/disputed rather than picking one side with confidence.
+
 {structure_note}
 
 Write ONLY the final answer text (no "Step 1:" labels, no meta-commentary) — but make sure it reflects real reasoning over the evidence above, not a generic response."""

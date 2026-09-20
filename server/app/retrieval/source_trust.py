@@ -1,6 +1,10 @@
+import re
 from urllib.parse import urlparse
 
 OFFICIAL_SUFFIXES = [".gov", ".edu", ".mil"]
+# Country-code government domains (e.g. .gov.in, .gov.uk, .gov.au) — a plain
+# endswith(".gov") check misses these since the TLD comes after "gov".
+OFFICIAL_SUFFIX_PATTERN = re.compile(r"\.gov\.[a-z]{2,3}$", re.I)
 OFFICIAL_DOMAINS = {
     "who.int", "un.org", "europa.eu", "nasa.gov", "nih.gov", "cdc.gov",
     "sec.gov", "irs.gov", "supremecourt.gov",
@@ -34,7 +38,11 @@ def classify_domain(url: str) -> str:
     if not hostname:
         return "unknown"
 
-    if _matches_domain_set(hostname, OFFICIAL_DOMAINS) or any(hostname.endswith(suf) for suf in OFFICIAL_SUFFIXES):
+    if (
+        _matches_domain_set(hostname, OFFICIAL_DOMAINS)
+        or any(hostname.endswith(suf) for suf in OFFICIAL_SUFFIXES)
+        or OFFICIAL_SUFFIX_PATTERN.search(hostname)
+    ):
         return "official"
     if _matches_domain_set(hostname, REFERENCE_DOMAINS):
         return "reference"

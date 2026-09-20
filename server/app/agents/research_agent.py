@@ -155,14 +155,19 @@ class ResearchAgent(BaseAgent):
             doc_result, web_sources = await asyncio.gather(doc_task, web_task)
 
             ranked_web_sources = rank_sources(web_sources)
-            evidence = [
+            doc_evidence = [
                 {**s, "snippet": (doc_result["chunks"][i].get("content", "")[:400] if i < len(doc_result["chunks"]) else "")}
                 for i, s in enumerate(doc_result["sources"])
             ]
-            evidence += [
+            web_evidence = [
                 {"title": s.get("title"), "type": "web", "url": s.get("url"), "snippet": s.get("snippet"), "trustTier": s.get("trustTier")}
                 for s in ranked_web_sources
             ]
+            # For time-sensitive/forced-web-search categories (politics, news,
+            # biography, ...), live web evidence must win over any cached/
+            # stale doc (RAG) chunks — put it first so it's never the part
+            # truncated away by the topK cap below.
+            evidence = (web_evidence + doc_evidence) if force_web_search else (doc_evidence + web_evidence)
             evidence = evidence[: tier["topK"]]
 
             trust_tiers = count_trust_tiers(evidence)
