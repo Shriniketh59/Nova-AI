@@ -1,18 +1,29 @@
 import time
 
+from ..core.config import OLLAMA_MODEL
 from ..core.logger import logger
+from ..services.task_router import classify_topic
+from ..utils.completion_guard import generate_with_continuation
 from ..utils.context_manager import get_conversation_context
 from .base_agent import BaseAgent
 from .memory_agent import memory_agent
 from .planner_agent import PlannerAgent
-from .reasoning_agent import ReasoningAgent
 from .research_agent import ResearchAgent
-from .review_agent import ReviewAgent
+from .validation_agent import ValidationAgent
 
 MAX_REGENERATION_ATTEMPTS = 1
 MAX_EVIDENCE_ESCALATIONS = 1
 
 VERIFICATION_FAILURE_MESSAGE = "I couldn't verify this information from reliable sources."
+
+TOPIC_GUIDANCE = {
+    "medical": "This is a medical topic — be precise, note uncertainty, avoid definitive diagnosis/dosage claims not directly supported by evidence.",
+    "legal": "This is a legal topic — be precise about jurisdiction-dependence, avoid stating case-specific legal advice as fact.",
+    "biography": "This is a biographical topic — verify names/dates/roles against evidence rather than general knowledge.",
+    "news": "This is a current-events topic — flag if evidence may be outdated and avoid presenting stale info as current.",
+    "math": "This is a math/computation topic — show the calculation steps, don't just state the result.",
+    "research": "This is a research-depth topic — synthesize across sources rather than restating one.",
+}
 
 
 def _build_verification_failure_answer(evidence: list[dict]) -> str:
@@ -22,7 +33,61 @@ def _build_verification_failure_answer(evidence: list[dict]) -> str:
     return VERIFICATION_FAILURE_MESSAGE
 
 
-class SupervisorAgent(BaseAgent):
+def _build_reasoning_prompt(question: str, plan: dict, evidence_summary: str, contradictions: list, memories: list, feedback):
+    contradiction_note = (
+        "\nWarning — these sources disagree, address this explicitly:\n"
+        + "\n".join(f"- {c['sourceA']} vs {c['sourceB']}" for c in contradictions) + "\n"
+        if contradictions else ""
+    )
+
+    memory_note = (
+        "\n[RELEVANT CONVERSATION CONTEXT (Follow-up to previous turn)]\n"
+        + "\n".join(memories)
+        + "\nNote: Context from earlier in this conversation is solely for resolving references in follow-up questions. Answer ONLY the current question.\n"
+        if memories else ""
+    )
+
+    feedback_note = f"\nYour previous draft had issues, fix them: {feedback}\n" if feedback else ""
+
+    topic = classify_topic(question)
+    topic_note = f"\nDomain note: {TOPIC_GUIDANCE[topic]}\n" if topic in TOPIC_GUIDANCE else ""
+
+    structure_note = (
+        "Reply naturally in 1-2 sentences, no section headings."
+        if plan.get("taskType") == "greeting"
+        else """Structure your answer with these markdown sections, in order:
+## Direct Answer
+One or two sentences answering the question head-on.
+## Detailed Explanation
+Full reasoning, addressing every part of a multi-part question.
+## Key Findings
+A short bullet list of the most important facts from the evidence.
+## Conclusion
+A closing takeaway sentence."""
+    )
+
+    steps = " -> ".join(plan.get("steps", []))
+
+    return f"""Question: {question}
+
+Intent: {plan.get('intent', '')}
+Planned approach: {steps}
+{topic_note}{memory_note}
+Evidence gathered:
+{evidence_summary}
+{contradiction_note}{feedback_note}
+Think step by step before writing:
+1. What do the sources actually say, in relation to the question?
+2. Are there patterns or agreement across sources?
+3. If this is a comparison, weigh the options explicitly.
+4. State your conclusion clearly and directly.
+
+{structure_note}
+
+Write ONLY the final answer text (no "Step 1:" labels, no meta-commentary) — but make sure it reflects real reasoning over the evidence above, not a generic response."""
+
+
+class ToolAgent(BaseAgent):
     """Critical-thinking pipeline orchestrator:
     Question -> Intent Analysis -> Task Classification (Planner)
              -> Memory Retrieval
@@ -31,12 +96,34 @@ class SupervisorAgent(BaseAgent):
              -> Self Review (regenerate once if it fails)
              -> Final Answer"""
 
-    def __init__(self, planner=None, research=None, reasoning=None, review=None):
-        super().__init__("SupervisorAgent")
+    def __init__(self, planner=None, research=None, review=None):
+        super().__init__("ToolAgent")
         self.planner = planner or PlannerAgent()
         self.research = research or ResearchAgent()
-        self.reasoning = reasoning or ReasoningAgent()
-        self.review = review or ReviewAgent()
+        self.review = review or ValidationAgent()
+
+    async def _reason(self, question: str, context: dict) -> dict:
+        """Evidence Analysis -> Reasoning stage: takes the plan and evidence
+        and produces a reasoned draft answer. Inlined from the former
+        ReasoningAgent — this is a pipeline stage of the Tool agent, not a
+        separate agent."""
+        plan = context.get("plan", {})
+        evidence_summary = context.get("evidenceSummary", "")
+        contradictions = context.get("contradictions", [])
+        memories = context.get("memories", [])
+        feedback = context.get("feedback")
+        try:
+            prompt = _build_reasoning_prompt(question, plan, evidence_summary, contradictions, memories, feedback)
+            answer = await generate_with_continuation(
+                [{"role": "user", "content": prompt}],
+                model=OLLAMA_MODEL,
+                num_predict=4096,
+                temperature=0.4,
+                require_sections=plan.get("taskType") != "greeting",
+            )
+            return {"success": True, "output": {"answer": answer}}
+        except Exception as err:
+            return {"success": False, "output": {"answer": ""}, "error": str(err)}
 
     async def run(self, question: str, context: dict | None = None) -> dict:
         context = context or {}
@@ -49,7 +136,7 @@ class SupervisorAgent(BaseAgent):
 
         def on_stage(name):
             nonlocal stage_start, last_stage
-            logger.info("supervisor.stage", {"chatId": chat_id, "stage": last_stage, "latencyMs": round((time.time() - stage_start) * 1000)})
+            logger.info("tool_agent.stage", {"chatId": chat_id, "stage": last_stage, "latencyMs": round((time.time() - stage_start) * 1000)})
             stage_start = time.time()
             last_stage = name
             raw_on_stage(name)
@@ -107,7 +194,7 @@ class SupervisorAgent(BaseAgent):
         trust_tiers, category = output["trustTiers"], output["category"]
 
         on_stage("reasoning")
-        reasoning_result = await self.reasoning.run(question, {"plan": plan, "evidenceSummary": evidence_summary, "contradictions": contradictions, "memories": memories})
+        reasoning_result = await self._reason(question, {"plan": plan, "evidenceSummary": evidence_summary, "contradictions": contradictions, "memories": memories})
         answer = reasoning_result["output"]["answer"]
 
         on_stage("reviewing")
@@ -124,7 +211,7 @@ class SupervisorAgent(BaseAgent):
             trust_tiers, category = output["trustTiers"], output["category"]
 
             on_stage("reasoning")
-            reasoning_result = await self.reasoning.run(question, {"plan": plan, "evidenceSummary": evidence_summary, "contradictions": contradictions, "memories": memories})
+            reasoning_result = await self._reason(question, {"plan": plan, "evidenceSummary": evidence_summary, "contradictions": contradictions, "memories": memories})
             answer = reasoning_result["output"]["answer"]
 
             on_stage("reviewing")
@@ -138,7 +225,7 @@ class SupervisorAgent(BaseAgent):
         while not verification_failed and not critique["pass"] and attempts < MAX_REGENERATION_ATTEMPTS:
             attempts += 1
             on_stage("regenerating")
-            reasoning_result = await self.reasoning.run(question, {
+            reasoning_result = await self._reason(question, {
                 "plan": plan, "evidenceSummary": evidence_summary, "contradictions": contradictions,
                 "memories": memories, "feedback": "; ".join(critique["issues"]),
             })
@@ -161,7 +248,7 @@ class SupervisorAgent(BaseAgent):
                 "reason": critique.get("confidenceReason") or f"{source_count} source(s) used.",
             }
 
-        logger.info("supervisor.stage", {"chatId": chat_id, "stage": last_stage, "latencyMs": round((time.time() - stage_start) * 1000)})
+        logger.info("tool_agent.stage", {"chatId": chat_id, "stage": last_stage, "latencyMs": round((time.time() - stage_start) * 1000)})
 
         return {
             "success": True,

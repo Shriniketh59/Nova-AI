@@ -8,8 +8,7 @@ Chroma is the default backend: a fully local, embedded, persistent store
 (no server process, no network, no API key). Qdrant is also fully implemented
 (it wraps the existing functional module in qdrant_client.py, which callers
 can keep importing directly) and stays selectable via
-VECTOR_STORE_BACKEND=qdrant. FAISS and Milvus are stubbed so the factory and
-call sites are ready, but raise NotImplementedError.
+VECTOR_STORE_BACKEND=qdrant for deployments that already run a Qdrant service.
 
 All backends speak the same wire shapes so call sites are backend-agnostic:
 
@@ -307,53 +306,120 @@ class ChromaVectorStore(VectorStore):
 
         return await self._run(_do)
 
-
-class FaissVectorStore(VectorStore):
-    """Not implemented: FAISS has no metadata-filtering or HTTP server story
-    here; would need a local index file + sidecar payload store. Stubbed for
-    future work."""
-
-    async def ensure_collection(self, collection: dict):
-        raise NotImplementedError("FaissVectorStore is not implemented")
-
-    async def upsert(self, collection_name: str, points: list[dict]):
-        raise NotImplementedError("FaissVectorStore is not implemented")
-
-    async def search(self, collection_name, vector, limit=10, filter=None):
-        raise NotImplementedError("FaissVectorStore is not implemented")
-
-    async def delete(self, collection_name: str, point_ids: list[str] | None = None, filter: dict | None = None):
-        raise NotImplementedError("FaissVectorStore is not implemented")
-
-    async def filter_by_metadata(self, collection_name: str, filter: dict, limit: int = 100):
-        raise NotImplementedError("FaissVectorStore is not implemented")
-
-
-class MilvusVectorStore(VectorStore):
-    """Not implemented: no Milvus client dependency installed."""
+    @staticmethod
+    async def _run(fn, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
 
     async def ensure_collection(self, collection: dict):
-        raise NotImplementedError("MilvusVectorStore is not implemented")
+        def _do():
+            col = self._collection(collection["name"], collection.get("vectorSize"))
+            return {"status": "ok", "name": col.name}
+
+        return await self._run(_do)
 
     async def upsert(self, collection_name: str, points: list[dict]):
-        raise NotImplementedError("MilvusVectorStore is not implemented")
+        if not points:
+            return {"status": "ok", "upserted": 0}
 
-    async def search(self, collection_name, vector, limit=10, filter=None):
-        raise NotImplementedError("MilvusVectorStore is not implemented")
+        def _do():
+            col = self._collection(collection_name)
+            ids, embeddings, metadatas, documents = [], [], [], []
+            for p in points:
+                payload = p.get("payload") or {}
+                # Chroma requires string ids; DB ids may be ints/UUID objects.
+                ids.append(str(p["id"]))
+                embeddings.append(list(p["vector"]))
+                metadatas.append(_scalar_metadata(payload))
+                documents.append(payload.get(_CONTENT_KEY) or "")
+            col.upsert(ids=ids, embeddings=embeddings, metadatas=metadatas, documents=documents)
+            return {"status": "ok", "upserted": len(ids)}
+
+        return await self._run(_do)
+
+    async def search(
+        self,
+        collection_name: str,
+        vector: list[float],
+        limit: int = 10,
+        filter: dict | None = None,
+    ) -> list[dict]:
+        def _do():
+            col = self._collection(collection_name)
+            if col.count() == 0:
+                return []
+            where = _to_chroma_where(filter)
+            res = col.query(
+                query_embeddings=[list(vector)],
+                n_results=max(1, limit),
+                where=where,
+                include=["metadatas", "documents", "distances"],
+            )
+            ids = (res.get("ids") or [[]])[0]
+            metadatas = (res.get("metadatas") or [[]])[0]
+            documents = (res.get("documents") or [[]])[0]
+            distances = (res.get("distances") or [[]])[0]
+
+            out = []
+            for i, point_id in enumerate(ids):
+                meta = dict(metadatas[i] or {}) if i < len(metadatas) else {}
+                content = documents[i] if i < len(documents) else ""
+                distance = distances[i] if i < len(distances) else 1.0
+                # Collection uses cosine space, so distance = 1 - cosine
+                # similarity. Clamp because HNSW can return tiny negatives.
+                score = max(0.0, min(1.0, 1.0 - float(distance)))
+                out.append({
+                    "id": point_id,
+                    "score": score,
+                    "payload": {**meta, _CONTENT_KEY: content},
+                })
+            return out
+
+        return await self._run(_do)
 
     async def delete(self, collection_name: str, point_ids: list[str] | None = None, filter: dict | None = None):
-        raise NotImplementedError("MilvusVectorStore is not implemented")
+        if point_ids is None and filter is None:
+            raise ValueError("delete() requires either point_ids or filter")
 
-    async def filter_by_metadata(self, collection_name: str, filter: dict, limit: int = 100):
-        raise NotImplementedError("MilvusVectorStore is not implemented")
+        def _do():
+            col = self._collection(collection_name)
+            if point_ids is not None:
+                col.delete(ids=[str(p) for p in point_ids])
+            else:
+                where = _to_chroma_where(filter)
+                if where is None:
+                    raise ValueError("delete() filter did not translate to any Chroma condition")
+                col.delete(where=where)
+            return {"status": "ok"}
+
+        return await self._run(_do)
+
+    async def filter_by_metadata(self, collection_name: str, filter: dict, limit: int = 100) -> list[dict]:
+        def _do():
+            col = self._collection(collection_name)
+            where = _to_chroma_where(filter)
+            res = col.get(where=where, limit=limit, include=["metadatas", "documents"])
+            ids = res.get("ids") or []
+            metadatas = res.get("metadatas") or []
+            documents = res.get("documents") or []
+            return [
+                {
+                    "id": point_id,
+                    "payload": {
+                        **(dict(metadatas[i]) if i < len(metadatas) and metadatas[i] else {}),
+                        _CONTENT_KEY: documents[i] if i < len(documents) else "",
+                    },
+                }
+                for i, point_id in enumerate(ids)
+            ]
+
+        return await self._run(_do)
 
 
 _BACKENDS = {
     "qdrant": QdrantVectorStore,
     "chroma": ChromaVectorStore,
     "chromadb": ChromaVectorStore,
-    "faiss": FaissVectorStore,
-    "milvus": MilvusVectorStore,
 }
 
 

@@ -1,14 +1,5 @@
 import re
 
-RESUME_RE = re.compile(r"\bresume\b|\bcv\b", re.I)
-ATS_RE = re.compile(r"\bats\b.*(score|calculate|rate)|calculate.*\bats\b", re.I)
-ANALYZE_RE = re.compile(r"\b(review|analyze|analyse|summarize|summarise|check|evaluate|critique)\b", re.I)
-COMPARE_RE = re.compile(
-    r"\b(compare|comparison|diff|difference|differences|contrast)\b.*\b(document|doc|file|pdf|these|them|both)\b"
-    r"|\b(document|doc|file)s?\b.*\b(compare|differ|contrast)\b",
-    re.I,
-)
-
 CODE_LANGS = re.compile(
     r"(java|python|javascript|typescript|c\+\+|c#|go|golang|rust|ruby|php|sql|html|css|kotlin|swift|react|node\.?js|express)",
     re.I,
@@ -41,7 +32,7 @@ def classify_topic(query: str) -> str:
     """Lightweight heuristic topic-type classifier (keyword/regex based).
 
     Distinct from `classify_task`, which decides *which agent handles this
-    turn* (vision/coding/document_*). This decides the *subject-matter
+    turn* (coding vs. general). This decides the *subject-matter
     category* of a query — used for routing to research/biography/news/
     math/medical/legal specialists and for confidence scoring (contested
     categories in confidence_engine.py)."""
@@ -64,22 +55,10 @@ def classify_topic(query: str) -> str:
 
 
 def classify_task(query: str, has_files: bool = False, has_images: bool = False, file_count: int = 0) -> dict:
-    """Priority order: Uploaded Image > Uploaded Document > Coding > Memory/RAG > Web Search."""
-    if has_images:
-        return {"type": "vision"}
-    if not has_files and is_coding_question(query):
-        return {"type": "coding"}
-    if not has_files:
-        return {"type": "general"}
+    """Priority order: Coding > Memory/RAG > Web Search.
 
-    if file_count >= 2 and COMPARE_RE.search(query):
-        return {"type": "document_comparison"}
-    if ATS_RE.search(query):
-        return {"type": "ats"}
-    if RESUME_RE.search(query) and ANALYZE_RE.search(query):
-        return {"type": "resume_analysis"}
-    if ANALYZE_RE.search(query):
-        return {"type": "document_analysis"}
+    Uploaded documents/images are handled by the general RAG retrieval path
+    (via the Research agent), not a dedicated per-file-type agent."""
     if is_coding_question(query):
         return {"type": "coding"}
 

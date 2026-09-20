@@ -4,8 +4,6 @@ from httpx import Response
 
 from app.retrieval.vector_store import (
     ChromaVectorStore,
-    FaissVectorStore,
-    MilvusVectorStore,
     QdrantVectorStore,
     VectorStore,
     get_vector_store,
@@ -31,7 +29,7 @@ def test_qdrant_remains_selectable(monkeypatch):
     assert isinstance(store, QdrantVectorStore)
 
 
-@pytest.mark.parametrize("name,cls", [("chroma", ChromaVectorStore), ("chromadb", ChromaVectorStore), ("faiss", FaissVectorStore), ("milvus", MilvusVectorStore)])
+@pytest.mark.parametrize("name,cls", [("chroma", ChromaVectorStore), ("chromadb", ChromaVectorStore)])
 def test_get_vector_store_resolves_alternate_backends_by_name(name, cls):
     store = get_vector_store(name)
     assert isinstance(store, cls)
@@ -40,22 +38,6 @@ def test_get_vector_store_resolves_alternate_backends_by_name(name, cls):
 def test_get_vector_store_rejects_unknown_backend():
     with pytest.raises(ValueError):
         get_vector_store("not-a-real-backend")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("store_cls", [FaissVectorStore, MilvusVectorStore])
-async def test_unimplemented_backends_raise_not_implemented_on_every_method(store_cls):
-    store = store_cls()
-    with pytest.raises(NotImplementedError):
-        await store.ensure_collection({"name": "x", "vectorSize": 4, "distance": "Cosine"})
-    with pytest.raises(NotImplementedError):
-        await store.upsert("x", [])
-    with pytest.raises(NotImplementedError):
-        await store.search("x", [0.1, 0.2])
-    with pytest.raises(NotImplementedError):
-        await store.delete("x", point_ids=["1"])
-    with pytest.raises(NotImplementedError):
-        await store.filter_by_metadata("x", {})
 
 
 def test_vector_store_is_abstract_and_cannot_be_instantiated_directly():

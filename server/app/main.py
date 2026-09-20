@@ -11,7 +11,7 @@ from .core.db import init_db
 from .core.logger import logger
 from .middleware.csrf import csrf_protect
 from .core.startup_checks import check_ollama_models, ensure_vector_store_ready
-from .routes import chats, upload, query, agent_chat, ide_agent, fs_route, nova_route, health, translate, interview_coach, documents, voice_route, auth
+from .routes import chats, upload, query, agent_chat, ide_agent, fs_route, nova_route, health, documents, voice_route, auth
 from .routes import orchestrator_route, local_voice_ws
 
 app = FastAPI()
@@ -58,8 +58,6 @@ app.include_router(ide_agent.router)
 app.include_router(fs_route.router)
 app.include_router(nova_route.router)
 app.include_router(health.router)
-app.include_router(translate.router)
-app.include_router(interview_coach.router)
 app.include_router(documents.router)
 app.include_router(voice_route.router)
 app.include_router(orchestrator_route.router)

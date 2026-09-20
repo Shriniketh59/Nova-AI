@@ -89,12 +89,12 @@ def _detect_conflict(chunks: list[dict]) -> dict:
     return {"found": False, "detail": None}
 
 
-class ReviewAgent(BaseAgent):
+class ValidationAgent(BaseAgent):
     """Final decision-making step: Question -> Retrieve -> Validate -> Compare
     -> Generate -> Review -> Return."""
 
     def __init__(self):
-        super().__init__("ReviewAgent")
+        super().__init__("ValidationAgent")
 
     async def run(self, answer: str, context: dict | None = None) -> dict:
         context = context or {}
@@ -126,7 +126,7 @@ class ReviewAgent(BaseAgent):
         }
 
     async def critique(self, answer: str, question: str, evidence_summary: str = "", contradictions: list | None = None, domain: str = "document") -> dict:
-        """Real LLM-judge critique for the critical-thinking pipeline (SupervisorAgent)."""
+        """Real LLM-judge critique for the critical-thinking pipeline (ToolAgent)."""
         contradictions = contradictions or []
         is_code = domain == "code"
         if is_code:

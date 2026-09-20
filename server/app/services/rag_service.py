@@ -4,11 +4,11 @@ from ..core.config import OLLAMA_URL, OLLAMA_MODEL, RAG_TOP_K
 from ..core.logger import logger
 from ..retrieval.retrieval_service import retrieve
 from .prompt_builder import build_rag_prompt
-from ..agents.review_agent import ReviewAgent
+from ..agents.validation_agent import ValidationAgent
 
 DEFAULT_TOP_K = RAG_TOP_K
 
-review_agent = ReviewAgent()
+validation_agent = ValidationAgent()
 
 
 def _estimate_tokens(text: str) -> int:
@@ -35,7 +35,7 @@ async def _call_llm(prompt: str) -> str:
 async def run_rag_query(question: str, chat_id: str, top_k: int | None = None) -> dict:
     """Document-grounded RAG pipeline: hybrid+expanded+reranked retrieval ->
     grounded prompt -> generate -> review (confidence override + conflict
-    check). This is the strict path — ReviewAgent can replace the answer
+    check). This is the strict path — ValidationAgent can replace the answer
     entirely with the "not found" fallback when confidence is low, unlike the
     general assistant route which allows web/model fallback."""
     top_k = top_k or DEFAULT_TOP_K
@@ -55,7 +55,7 @@ async def run_rag_query(question: str, chat_id: str, top_k: int | None = None) -
     })
 
     if not chunks:
-        reviewed = await review_agent.run("", {"chunks": chunks, "sources": sources, "confidence": confidence})
+        reviewed = await validation_agent.run("", {"chunks": chunks, "sources": sources, "confidence": confidence})
         return {"answer": reviewed["output"]["answer"], "sources": [], "confidence": confidence, "conflict": False}
 
     logger.info("rag.context", {"contextChars": len(context_text), "estTokens": _estimate_tokens(context_text)})
@@ -65,7 +65,7 @@ async def run_rag_query(question: str, chat_id: str, top_k: int | None = None) -
 
     logger.info("rag.response", {"estTokens": _estimate_tokens(raw_answer)})
 
-    reviewed = await review_agent.run(raw_answer, {"chunks": chunks, "sources": sources, "confidence": confidence})
+    reviewed = await validation_agent.run(raw_answer, {"chunks": chunks, "sources": sources, "confidence": confidence})
     return {
         "answer": reviewed["output"]["answer"],
         "sources": reviewed["output"]["evidence"],

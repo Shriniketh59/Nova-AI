@@ -10,7 +10,7 @@ from ..core.config import (
 from ..utils.completion_guard import is_truncated, close_unbalanced_fences
 from ..utils.code_validation import quick_validate_code
 from .base_agent import BaseAgent
-from .review_agent import ReviewAgent
+from .validation_agent import ValidationAgent
 
 MAX_REGENERATIONS = 1
 
@@ -140,7 +140,25 @@ class CodeAgent(BaseAgent):
 
     def __init__(self):
         super().__init__("CodeAgent")
-        self.review_agent = ReviewAgent()
+        self.validation_agent = ValidationAgent()
+
+    async def _retrieve_documentation(self, question: str) -> str:
+        """Fetch library/API documentation through the same retrieval pipeline
+        the rest of the app uses (vector DB + web). Returns "" when the
+        question doesn't warrant it or retrieval fails — code generation must
+        never be blocked by a retrieval problem."""
+        if not LIBRARY_DOC_RE.search(question):
+            return ""
+        try:
+            from ..retrieval.retrieval_service import retrieve
+
+            result = await retrieve(question, top_k=4, include_web=True)
+            return (result.get("contextText") or "")[:MAX_DOC_CONTEXT_CHARS]
+        except Exception as err:
+            from ..core.logger import logger
+
+            logger.warn("code_agent.doc_retrieval_failed", {"error": str(err)})
+            return ""
 
     async def _retrieve_documentation(self, question: str) -> str:
         """Fetch library/API documentation through the same retrieval pipeline
@@ -199,7 +217,7 @@ class CodeAgent(BaseAgent):
         confidence = _confidence_from_validation(validation, regenerated)
 
         if CODE_LLM_REVIEW and validation["pass"]:
-            code_critique = await self.review_agent.critique(answer, question, domain="code")
+            code_critique = await self.validation_agent.critique(answer, question, domain="code")
             if not code_critique["pass"]:
                 validation = {**validation, "pass": False, "issues": [*validation["issues"], *code_critique["issues"]]}
                 score = min(confidence["score"], code_critique["confidenceScore"])

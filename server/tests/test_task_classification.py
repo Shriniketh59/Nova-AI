@@ -6,11 +6,6 @@ from app.services.task_router import classify_task, classify_topic, is_coding_qu
 # task_router.classify_task — topic-type routing
 # ---------------------------------------------------------------------------
 
-def test_routes_to_vision_whenever_images_are_present_regardless_of_query():
-    assert classify_task("what is this", has_images=True)["type"] == "vision"
-    assert classify_task("write me a python function", has_images=True, has_files=True)["type"] == "vision"
-
-
 def test_routes_coding_questions_without_files_to_coding():
     assert classify_task("write a python function to reverse a string")["type"] == "coding"
     assert classify_task("fix this java null pointer exception")["type"] == "coding"
@@ -20,26 +15,6 @@ def test_routes_coding_questions_without_files_to_coding():
 def test_routes_plain_questions_without_files_to_general():
     assert classify_task("what's the weather like today")["type"] == "general"
     assert classify_task("tell me about the history of Rome")["type"] == "general"
-
-
-def test_routes_to_document_comparison_when_multiple_files_and_compare_language():
-    result = classify_task("compare these two documents", has_files=True, file_count=2)
-    assert result["type"] == "document_comparison"
-
-
-def test_routes_to_ats_for_ats_score_requests_with_files():
-    result = classify_task("calculate my ats score", has_files=True, file_count=1)
-    assert result["type"] == "ats"
-
-
-def test_routes_to_resume_analysis_for_resume_review_requests():
-    result = classify_task("please review my resume", has_files=True, file_count=1)
-    assert result["type"] == "resume_analysis"
-
-
-def test_routes_to_document_analysis_for_generic_analyze_requests_with_files():
-    result = classify_task("summarize this document", has_files=True, file_count=1)
-    assert result["type"] == "document_analysis"
 
 
 def test_is_coding_question_detects_domain_specific_terms_without_verbs():
