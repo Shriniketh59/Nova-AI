@@ -17,10 +17,17 @@ def test_intent_router_classifications():
     assert classify_intent("debug this javascript code") == "coding"
     assert classify_intent("implement a fast LRU cache in Go") == "coding"
 
-    # Live web retrieval enabled for prompts
+    # Math — trivial arithmetic skips retrieval/web entirely
+    assert classify_intent("what is 12 * 8") == "math"
+    assert classify_intent("2+2") == "math"
+
+    # Live web retrieval is reserved for queries that actually need current
+    # info — general/knowledge queries are served from the model/RAG without
+    # paying for a DDGS round trip on every request.
     assert needs_web_search("current_info") is True
     assert needs_web_search("greeting") is False
-    assert needs_web_search("general") is True
+    assert needs_web_search("general") is False
+    assert needs_web_search("doc_query") is False
 
 
 @pytest.mark.asyncio

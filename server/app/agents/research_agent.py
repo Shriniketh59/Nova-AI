@@ -58,23 +58,37 @@ def detect_fact_disagreements(evidence: list[dict]) -> list[dict]:
 
 
 async def _fetch_web_sources(query: str, max_results: int = 5) -> list[dict]:
-    """DDGS web search — no API key, fully local."""
-    try:
-        from ddgs import DDGS
-        results = []
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
-        return [
-            {
-                "title": r.get("title", ""),
-                "url": r.get("href", ""),
-                "snippet": (r.get("body", "") or "")[:400],
-                "type": "web",
-            }
-            for r in results
-        ][:max_results]
-    except Exception:
-        return []
+    """DDGS web search — no API key, fully local. Runs the blocking DDGS
+    call in a worker thread (never on the event loop) and is bounded by a
+    timeout so a hung search can't stall the whole request."""
+    loop = asyncio.get_running_loop()
+
+    def _blocking():
+        try:
+            from ddgs import DDGS
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=max_results))
+            return [
+                {
+                    "title": r.get("title", ""),
+                    "url": r.get("href", ""),
+                    "snippet": (r.get("body", "") or "")[:400],
+                    "type": "web",
+                }
+                for r in results
+            ][:max_results]
+        except Exception:
+            return []
+
+    for attempt in range(2):  # bounded retry: 1 retry on timeout/empty transient failure
+        try:
+            results = await asyncio.wait_for(loop.run_in_executor(None, _blocking), timeout=8.0)
+            if results or attempt == 1:
+                return results
+        except asyncio.TimeoutError:
+            if attempt == 1:
+                return []
+    return []
 
 
 async def _detect_contradictions(evidence: list[dict]) -> list[dict]:

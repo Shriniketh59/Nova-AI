@@ -1,6 +1,8 @@
+import asyncio
+
 import httpx
 
-from ..core.config import OLLAMA_URL, OLLAMA_MODEL, RAG_TOP_K
+from ..core.config import OLLAMA_URL, OLLAMA_MODEL, RAG_TOP_K, get_ollama_options
 from ..core.logger import logger
 from ..retrieval.retrieval_service import retrieve
 from .prompt_builder import build_rag_prompt
@@ -16,20 +18,31 @@ def _estimate_tokens(text: str) -> int:
 
 
 async def _call_llm(prompt: str) -> str:
-    async with httpx.AsyncClient(timeout=180) as client:
-        res = await client.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={
-                "model": OLLAMA_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "options": {"temperature": 0.2},
-            },
-        )
-        if res.status_code >= 400:
-            raise RuntimeError(f"LLM request failed with status {res.status_code}")
-        data = res.json()
-        return (data.get("message") or {}).get("content", "")
+    """Bounded: one retry on transient failure/timeout so a single hung
+    Ollama call can't stall the whole RAG request indefinitely."""
+    last_err = None
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=5)) as client:
+                res = await client.post(
+                    f"{OLLAMA_URL}/api/chat",
+                    json={
+                        "model": OLLAMA_MODEL,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "stream": False,
+                        "options": get_ollama_options({"temperature": 0.2}),
+                    },
+                )
+                if res.status_code >= 400:
+                    raise RuntimeError(f"LLM request failed with status {res.status_code}")
+                data = res.json()
+                return (data.get("message") or {}).get("content", "")
+        except (httpx.TimeoutException, httpx.ConnectError, RuntimeError) as err:
+            last_err = err
+            if attempt == 0:
+                await asyncio.sleep(0.5)
+                continue
+    raise RuntimeError(f"LLM request failed after retry: {last_err}")
 
 
 async def run_rag_query(question: str, chat_id: str, top_k: int | None = None) -> dict:

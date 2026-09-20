@@ -21,16 +21,18 @@ DB_NAME = "nova_ai"
 PORT = _int("PORT", 5001)
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
 OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "all-minilm:latest")
 OLLAMA_CODE_MODEL = os.environ.get("OLLAMA_CODE_MODEL", "qwen2.5-coder:1.5b")
 OLLAMA_NUM_THREAD = _int("OLLAMA_NUM_THREAD", os.cpu_count() or 4)
+OLLAMA_NUM_CTX = _int("OLLAMA_NUM_CTX", 4096)
 
 
 def get_ollama_options(extra_options: dict | None = None) -> dict:
     opts = {
         "num_gpu": 0,
         "num_thread": OLLAMA_NUM_THREAD,
+        "num_ctx": OLLAMA_NUM_CTX,
     }
     if extra_options:
         opts.update(extra_options)

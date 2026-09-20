@@ -129,6 +129,14 @@ class ValidationAgent(BaseAgent):
         """Real LLM-judge critique for the critical-thinking pipeline (ToolAgent)."""
         contradictions = contradictions or []
         is_code = domain == "code"
+
+        # Hard guard: with zero evidence, never let a factual answer come back
+        # as confident/authoritative — regardless of what the LLM judge (or its
+        # failure fallback) says.
+        no_evidence = (not is_code) and (
+            not evidence_summary or evidence_summary.strip() == "No external evidence found — answer must rely on general knowledge only."
+        )
+
         if is_code:
             user_content = f"Question: {question}\n\nCode answer to review:\n{answer}"
         else:
@@ -156,6 +164,16 @@ class ValidationAgent(BaseAgent):
                     raise RuntimeError(f"Review LLM call failed: {res.status_code}")
                 data = res.json()
                 raw = (data.get("message") or {}).get("content", "")
-                return _parse_critique(raw)
+                result = _parse_critique(raw)
         except Exception as err:
-            return {"pass": True, "issues": [], "needsMoreEvidence": False, "confidenceScore": 50, "confidenceReason": f"Review unavailable: {err}"}
+            result = {"pass": True, "issues": [], "needsMoreEvidence": False, "confidenceScore": 50, "confidenceReason": f"Review unavailable: {err}"}
+
+        if no_evidence:
+            result["needsMoreEvidence"] = True
+            result["pass"] = False
+            result["confidenceScore"] = min(result.get("confidenceScore", 0) or 0, 15)
+            result["confidenceReason"] = "No evidence (web or document) was retrieved for this factual query."
+            result.setdefault("issues", [])
+            result["issues"] = [*result["issues"], "No supporting evidence was found — answer cannot be presented as confident/authoritative."]
+
+        return result

@@ -17,6 +17,15 @@ import re
 # Pattern definitions
 # ---------------------------------------------------------------------------
 
+# Simple arithmetic / calculator-style queries — these need no retrieval,
+# no memory lookup, no web search: just the model (or a calculator) doing
+# math directly. Keeps trivial queries off the full agent pipeline.
+MATH_RE = re.compile(
+    r"^\s*(what\s+is\s+|calculate\s+|compute\s+|solve\s+)?"
+    r"[\d\.\s]+[\+\-\*/x×÷\^%][\d\.\s\+\-\*/x×÷\^%\(\)]*\s*\??\s*$",
+    re.I,
+)
+
 GREETING_RE = re.compile(
     r"^\s*(hi|hello|hey|yo|sup|hii+|good\s+(morning|evening|afternoon|night))(\s+(there|nova|assistant|bot|friend|all|everyone))?\W*$",
     re.I,
@@ -86,6 +95,9 @@ def classify_intent(query: str, has_files: bool = False, has_kb_docs: bool = Fal
     if GREETING_RE.match(q) or GREETING_RE.match(q_norm):
         return "greeting"
 
+    if MATH_RE.match(q) or MATH_RE.match(q_norm):
+        return "math"
+
     if is_coding_question(q) or is_coding_question(q_norm):
         return "coding"
 
@@ -119,7 +131,11 @@ def is_coding_question(query: str) -> bool:
 
 
 def needs_web_search(intent: str) -> bool:
-    return intent not in ("greeting", "coding")
+    # Only "current_info" queries need a live web search. Doc/knowledge
+    # ("doc_query") and general questions are served from the vector DB /
+    # model directly — hitting DDGS for every general query added latency
+    # and unrelated web noise for no benefit.
+    return intent == "current_info"
 
 
 def needs_vector_retrieval(intent: str, has_files: bool = False, has_kb_docs: bool = False) -> bool:

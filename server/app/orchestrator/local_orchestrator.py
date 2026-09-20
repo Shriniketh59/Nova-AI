@@ -28,6 +28,7 @@ from ..core.config import (
     MAX_CONTINUATIONS,
     MAX_OUTPUT_TOKENS,
     DEFAULT_USER_ID,
+    get_ollama_options,
 )
 from ..core.logger import logger
 from .intent_router import classify_intent, needs_web_search, needs_vector_retrieval, is_coding_question
@@ -284,14 +285,10 @@ async def _stream_ollama(
         "model": model,
         "messages": messages,
         "stream": True,
-        "options": {
-            "num_predict": max_tokens,
-            "temperature": 0.25,
-            "num_ctx": 4096,
-        },
+        "options": get_ollama_options({"num_predict": max_tokens, "temperature": 0.25}),
     }
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=5)) as client:
             async with client.stream(
                 "POST",
                 f"{OLLAMA_URL}/api/chat",
@@ -370,6 +367,17 @@ async def orchestrate_stream(
         if intent == "greeting":
             yield {"sources": []}
             yield {"token": "Hey! What can I help you with?"}
+            yield {"done": True}
+            return
+
+        # 3b. Simple math — fast path straight to the model, no memory/RAG/web
+        # overhead. Trivial arithmetic never needs Planning, Research, or
+        # Memory agents involved.
+        if intent == "math":
+            yield {"sources": []}
+            messages = _build_messages(query=query, is_voice=is_voice)
+            async for token in _stream_ollama(messages, max_tokens=min(MAX_TOKENS, 256)):
+                yield {"token": token}
             yield {"done": True}
             return
 
