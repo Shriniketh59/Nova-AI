@@ -1,13 +1,14 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..agents.code_agent import CodeAgent
 from ..agents.planner_agent import PlannerAgent
-from ..agents.review_agent import ReviewAgent
+from ..agents.validation_agent import ValidationAgent
+from ..middleware.auth_middleware import get_current_user
 
 router = APIRouter()
 code_agent = CodeAgent()
-review_agent = ReviewAgent()
+validation_agent = ValidationAgent()
 planner_agent = PlannerAgent()
 
 
@@ -17,7 +18,7 @@ class IdeAgentBody(BaseModel):
 
 
 @router.post("/api/ide/agent")
-async def ide_agent(body: IdeAgentBody):
+async def ide_agent(body: IdeAgentBody, current_user: dict = Depends(get_current_user)):
     if not body.agent or not body.input:
         raise HTTPException(status_code=400, detail="agent and input are required")
 
@@ -34,7 +35,7 @@ async def ide_agent(body: IdeAgentBody):
             return {"output": md}
 
         if body.agent == "review":
-            critique = await review_agent.critique(body.input, question=body.input, evidence_summary=body.input, contradictions=[])
+            critique = await validation_agent.critique(body.input, question=body.input, evidence_summary=body.input, contradictions=[])
             issues = "\n".join(f"- {i}" for i in critique["issues"]) if critique["issues"] else "- None"
             md = f"# Verdict\n{'Pass' if critique['pass'] else 'Issues found'}\n\n# Issues\n{issues}\n\n# Confidence\n{critique['confidenceScore']}% — {critique['confidenceReason']}"
             return {"output": md}

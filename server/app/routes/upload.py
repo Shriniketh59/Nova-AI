@@ -8,10 +8,10 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
 from ..core import db
-from ..core.config import QDRANT_URL
+from ..retrieval.vector_store import get_vector_store, vector_store_enabled
 from ..middleware.auth_middleware import get_current_user
 from ..rag import parse_document, chunk_with_pages, generate_embedding, search_relevant_chunks
-from ..retrieval.qdrant_client import upsert_points, COLLECTIONS
+from ..retrieval.qdrant_client import COLLECTIONS
 
 router = APIRouter()
 
@@ -113,10 +113,10 @@ async def upload_file(
                 "INSERT INTO document_chunks (file_id, content, embedding, page_number) VALUES ($1, $2, $3, $4) RETURNING id",
                 [file_record["id"], content, json.dumps(embedding), page_number],
             )
-            if QDRANT_URL:
+            if vector_store_enabled():
                 chunk_id = chunk_result["rows"][0]["id"] if chunk_result["rows"] else None
                 try:
-                    await upsert_points(COLLECTIONS["documents"]["name"], [{
+                    await get_vector_store().upsert(COLLECTIONS["documents"]["name"], [{
                         "id": chunk_id,
                         "vector": embedding,
                         "payload": {

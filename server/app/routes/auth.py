@@ -9,7 +9,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr
 
 from ..core import db
-from ..core.config import AUTH_COOKIE_NAME, JWT_EXPIRES_DAYS
+from ..core.config import AUTH_COOKIE_NAME, COOKIE_SECURE, CSRF_COOKIE_NAME, JWT_EXPIRES_DAYS
 from ..core.logger import logger
 from ..middleware.auth_middleware import get_current_user
 from ..services.auth_service import (
@@ -48,7 +48,9 @@ class ResetPasswordBody(BaseModel):
 
 
 def _set_auth_cookie(response: Response, token: str) -> None:
-    """Set secure, HTTP-only authentication cookie."""
+    """Set secure, HTTP-only authentication cookie, plus a companion,
+    non-httponly CSRF token cookie for the double-submit CSRF check
+    (see app/middleware/csrf.py)."""
     max_age = JWT_EXPIRES_DAYS * 86400
     response.set_cookie(
         key=AUTH_COOKIE_NAME,
@@ -56,17 +58,32 @@ def _set_auth_cookie(response: Response, token: str) -> None:
         max_age=max_age,
         httponly=True,
         samesite="lax",
-        secure=False,  # Set to True in HTTPS production environments
+        secure=COOKIE_SECURE,
+        path="/",
+    )
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=secrets.token_urlsafe(32),
+        max_age=max_age,
+        httponly=False,  # must be readable by frontend JS to echo back as a header
+        samesite="lax",
+        secure=COOKIE_SECURE,
         path="/",
     )
 
 
 def _clear_auth_cookie(response: Response) -> None:
-    """Clear authentication cookie."""
+    """Clear authentication and CSRF cookies."""
     response.delete_cookie(
         key=AUTH_COOKIE_NAME,
         path="/",
         httponly=True,
+        samesite="lax",
+    )
+    response.delete_cookie(
+        key=CSRF_COOKIE_NAME,
+        path="/",
+        httponly=False,
         samesite="lax",
     )
 

@@ -8,27 +8,19 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..agents.code_agent import CodeAgent
-from ..agents.document_analysis_agent import DocumentAnalysisAgent
-from ..agents.document_comparison_agent import DocumentComparisonAgent
 from ..agents.memory_agent import memory_agent
-from ..agents.resume_analysis_agent import ResumeAnalysisAgent
-from ..agents.supervisor_agent import SupervisorAgent
-from ..agents.vision_agent import VisionAgent
+from ..agents.tool_agent import ToolAgent
 from ..core import db
 from ..core.logger import logger
 from ..middleware.auth_middleware import get_current_user
 from ..rag import fetch_chunks_for_chat, fetch_images_for_chat
-from ..services.ats_service import calculate_ats_score, format_ats_answer
 from ..services.document_type_detector import detect_document_request, build_summary
 from ..services.task_router import classify_task
+from ..utils.stream_cancel import drain_task_queue
 
 router = APIRouter()
 
-supervisor = SupervisorAgent()
-document_analysis_agent = DocumentAnalysisAgent()
-document_comparison_agent = DocumentComparisonAgent()
-resume_analysis_agent = ResumeAnalysisAgent()
-vision_agent = VisionAgent()
+tool_agent = ToolAgent()
 code_agent = CodeAgent()
 
 STAGE_LABELS = {
@@ -84,18 +76,6 @@ async def agent_chat(body: AgentChatBody, current_user: dict = Depends(get_curre
             task = classify_task(message, has_files=has_files, has_images=has_images, file_count=file_count)
             logger.info("task.route", {"reqId": req_id, "type": task["type"], "hasFiles": has_files, "hasImages": has_images})
 
-            if task["type"] == "vision":
-                image = chat_images[-1]
-                result = await vision_agent.run(message, {"filePath": image["file_path"], "fileName": image["original_filename"]})
-                answer = result["output"]["answer"]
-                confidence = {"score": 75 if result["success"] else 0, "label": "high" if result["success"] else "low", "reason": "Based on uploaded image content only."}
-
-                await db.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)", [chat_id, "ai", answer])
-                await db.query("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [chat_id])
-                yield _sse({"text": answer, "sources": [{"filename": image["original_filename"], "type": "image"}], "confidence": confidence})
-                yield "data: [DONE]\n\n"
-                return
-
             if task["type"] == "coding":
                 try:
                     token_queue: asyncio.Queue = asyncio.Queue()
@@ -107,14 +87,9 @@ async def agent_chat(body: AgentChatBody, current_user: dict = Depends(get_curre
 
                     gen_task = asyncio.create_task(code_agent.run_stream(message, on_token))
 
-                    while not gen_task.done():
-                        try:
-                            text = await asyncio.wait_for(token_queue.get(), timeout=0.1)
-                            yield _sse({"text": text, "sources": []})
-                        except asyncio.TimeoutError:
-                            continue
-                    while not token_queue.empty():
-                        yield _sse({"text": token_queue.get_nowait(), "sources": []})
+                    # Cancels gen_task if the client aborts mid-stream.
+                    async for text in drain_task_queue(gen_task, token_queue):
+                        yield _sse({"text": text, "sources": []})
 
                     result = await gen_task
                     code_answer = result["answer"]
@@ -127,65 +102,20 @@ async def agent_chat(body: AgentChatBody, current_user: dict = Depends(get_curre
                 yield "data: [DONE]\n\n"
                 return
 
-            if task["type"] != "general":
-                document_text = "\n".join(c["content"] for c in all_chat_chunks)
-                file_name = all_chat_chunks[0]["original_filename"] if all_chat_chunks else "document"
-
-                if task["type"] == "document_comparison":
-                    by_file: dict = {}
-                    for chunk in all_chat_chunks:
-                        existing = by_file.setdefault(chunk["file_id"], {"fileName": chunk["original_filename"], "text": ""})
-                        existing["text"] += f"{chunk['content']}\n"
-                    documents = list(by_file.values())
-                    result = await document_comparison_agent.run(message, {"documents": documents})
-                    answer = result["output"]["answer"]
-                    confidence = {"score": 75 if result["success"] else 0, "label": "high" if result["success"] else "low", "reason": "Based on the uploaded documents only."}
-                    source_cards = [{"filename": d["fileName"], "type": "document"} for d in documents]
-
-                    await db.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)", [chat_id, "ai", answer])
-                    await db.query("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [chat_id])
-                    yield _sse({"text": answer, "sources": source_cards, "confidence": confidence})
-                    yield "data: [DONE]\n\n"
-                    return
-
-                if task["type"] == "ats":
-                    ats_result = calculate_ats_score(document_text)
-                    answer = format_ats_answer(ats_result)
-                    confidence = {"score": ats_result["score"], "label": "high" if ats_result["score"] >= 70 else "medium" if ats_result["score"] >= 30 else "low", "reason": "Calculated from parsed resume content."}
-                elif task["type"] == "resume_analysis":
-                    result = await resume_analysis_agent.run(message, {"documentText": document_text, "fileName": file_name})
-                    answer = result["output"]["answer"]
-                    confidence = {"score": 75 if result["success"] else 0, "label": "high" if result["success"] else "low", "reason": "Based on uploaded resume content only."}
-                else:
-                    result = await document_analysis_agent.run(message, {"documentText": document_text, "fileName": file_name})
-                    answer = result["output"]["answer"]
-                    confidence = {"score": 75 if result["success"] else 0, "label": "high" if result["success"] else "low", "reason": "Based on uploaded document content only."}
-
-                await db.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)", [chat_id, "ai", answer])
-                await db.query("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [chat_id])
-                yield _sse({"text": answer, "sources": [{"filename": file_name, "type": "document"}], "confidence": confidence})
-                yield "data: [DONE]\n\n"
-                return
-
             stage_queue: asyncio.Queue = asyncio.Queue()
 
             def on_stage(stage):
                 stage_queue.put_nowait({"stage": stage, "stageLabel": STAGE_LABELS.get(stage, stage)})
 
-            supervisor_task = asyncio.create_task(
-                supervisor.run(message, {"chatId": chat_id, "excludeMessageId": user_msg["id"], "onStage": on_stage, "hasFiles": has_files})
+            tool_agent_task = asyncio.create_task(
+                tool_agent.run(message, {"chatId": chat_id, "excludeMessageId": user_msg["id"], "onStage": on_stage, "hasFiles": has_files})
             )
 
-            while not supervisor_task.done():
-                try:
-                    event = await asyncio.wait_for(stage_queue.get(), timeout=0.2)
-                    yield _sse(event)
-                except asyncio.TimeoutError:
-                    continue
-            while not stage_queue.empty():
-                yield _sse(stage_queue.get_nowait())
+            # Cancels the whole multi-agent run if the client aborts.
+            async for event in drain_task_queue(tool_agent_task, stage_queue, poll_interval=0.2):
+                yield _sse(event)
 
-            result = await supervisor_task
+            result = await tool_agent_task
 
             if not result["success"]:
                 raise RuntimeError(result.get("error") or "Agent execution failed")

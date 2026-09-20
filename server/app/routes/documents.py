@@ -3,109 +3,16 @@ import os
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from ..agents.document_analysis_agent import DocumentAnalysisAgent
-from ..agents.document_comparison_agent import DocumentComparisonAgent
 from ..agents.memory_agent import memory_agent
 from ..agents.research_agent import ResearchAgent
 from ..core import db
-from ..core.config import QDRANT_URL
+from ..retrieval.vector_store import get_vector_store, vector_store_enabled
 from ..middleware.auth_middleware import get_current_user
 from ..retrieval.qdrant_client import COLLECTIONS
 
 router = APIRouter()
 
-document_analysis_agent = DocumentAnalysisAgent()
-document_comparison_agent = DocumentComparisonAgent()
 research_agent = ResearchAgent()
-
-
-# ---------------------------------------------------------------------------
-# POST /api/compare — compare two+ uploaded documents in a chat
-# ---------------------------------------------------------------------------
-class CompareBody(BaseModel):
-    chatId: str
-    query: str | None = None
-
-
-@router.post("/api/compare")
-async def compare_documents(body: CompareBody, current_user: dict = Depends(get_current_user)):
-    user_id = current_user["id"]
-    chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [body.chatId, user_id])
-    if chat_check["rowCount"] == 0:
-        raise HTTPException(status_code=404, detail="Chat not found")
-
-    chunks = await db.query(
-        """SELECT dc.content, dc.file_id, uf.original_filename
-           FROM document_chunks dc JOIN uploaded_files uf ON uf.id = dc.file_id
-           WHERE uf.message_id IN (SELECT id FROM messages WHERE chat_id = $1)
-             AND uf.user_id = $2""",
-        [body.chatId, user_id],
-    )
-    by_file: dict = {}
-    for c in chunks["rows"]:
-        entry = by_file.setdefault(c["file_id"], {"fileName": c["original_filename"], "text": ""})
-        entry["text"] += f"{c['content']}\n"
-    documents = list(by_file.values())
-    if len(documents) < 2:
-        raise HTTPException(status_code=400, detail="At least two uploaded documents are required to compare")
-
-    result = await document_comparison_agent.run(body.query or "Compare these documents.", {"documents": documents})
-    if not result["success"]:
-        raise HTTPException(status_code=500, detail=result.get("error") or "Comparison failed")
-    return result["output"]
-
-
-# ---------------------------------------------------------------------------
-# POST /api/summarize — summarize an uploaded document (or arbitrary text)
-# ---------------------------------------------------------------------------
-class SummarizeBody(BaseModel):
-    chatId: str | None = None
-    fileId: str | None = None
-    text: str | None = None
-
-
-@router.post("/api/summarize")
-async def summarize(body: SummarizeBody, current_user: dict = Depends(get_current_user)):
-    user_id = current_user["id"]
-    if body.text:
-        document_text, file_name = body.text, "provided text"
-    elif body.fileId:
-        file_check = await db.query("SELECT id FROM uploaded_files WHERE id = $1 AND user_id = $2", [body.fileId, user_id])
-        if not file_check["rows"]:
-            raise HTTPException(status_code=404, detail="File not found")
-
-        chunks = await db.query(
-            """SELECT dc.content, uf.original_filename FROM document_chunks dc
-               JOIN uploaded_files uf ON uf.id = dc.file_id WHERE dc.file_id = $1 AND uf.user_id = $2""",
-            [body.fileId, user_id],
-        )
-        if not chunks["rows"]:
-            raise HTTPException(status_code=404, detail="File has no indexed content")
-        document_text = "\n".join(c["content"] for c in chunks["rows"])
-        file_name = chunks["rows"][0]["original_filename"]
-    elif body.chatId:
-        chat_check = await db.query("SELECT id FROM chats WHERE id = $1 AND user_id = $2", [body.chatId, user_id])
-        if not chat_check["rows"]:
-            raise HTTPException(status_code=404, detail="Chat not found")
-
-        chunks = await db.query(
-            """SELECT dc.content, uf.original_filename FROM document_chunks dc
-               JOIN uploaded_files uf ON uf.id = dc.file_id
-               WHERE uf.message_id IN (SELECT id FROM messages WHERE chat_id = $1)
-                 AND uf.user_id = $2""",
-            [body.chatId, user_id],
-        )
-        if not chunks["rows"]:
-            raise HTTPException(status_code=404, detail="No indexed documents found in this chat")
-        document_text = "\n".join(c["content"] for c in chunks["rows"])
-        file_name = chunks["rows"][0]["original_filename"]
-    else:
-        raise HTTPException(status_code=400, detail="One of text, fileId or chatId is required")
-
-    result = await document_analysis_agent.run("Summarize this document.", {"documentText": document_text, "fileName": file_name})
-    if not result["success"]:
-        raise HTTPException(status_code=500, detail=result.get("error") or "Summarization failed")
-    return result["output"]
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +82,7 @@ async def list_documents(current_user: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 @router.get("/api/collections")
 async def list_collections():
-    if not QDRANT_URL:
+    if not vector_store_enabled():
         return {"enabled": False, "collections": []}
     return {
         "enabled": True,
@@ -205,10 +112,8 @@ async def delete_document(file_id: str, current_user: dict = Depends(get_current
         except OSError:
             pass
 
-    if QDRANT_URL:
+    if vector_store_enabled():
         try:
-            from ..retrieval.vector_store import get_vector_store
-
             store = get_vector_store()
             await store.delete(COLLECTIONS["documents"]["name"], filter={"must": [{"key": "file_id", "match": {"value": file_id}}]})
         except Exception:

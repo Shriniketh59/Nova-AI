@@ -41,17 +41,17 @@ async def _summarize(messages: list[dict]) -> str:
         return ""
 
 
-async def get_conversation_context(chat_id: str, max_chars: int = 3000) -> str:
-    """Returns a context block for the prompt: a cached summary of older turns
-    (refreshed only every SUMMARY_REFRESH_THRESHOLD new messages) plus the
+async def get_conversation_context(chat_id: str, query: str = "", max_chars: int = 3000) -> str:
+    """Returns a context block for the prompt: a cached summary of older turns,
+    semantically retrieved past messages via vector embedding similarity, and
     most recent messages verbatim, budgeted to max_chars."""
     if not chat_id:
         return ""
 
-    chat_res = await db.query("SELECT summary, summary_message_count FROM chats WHERE id = $1", [chat_id])
+    chat_res = await db.query("SELECT * FROM chats WHERE id = $1", [chat_id])
     chat_row = chat_res["rows"][0] if chat_res["rows"] else {}
     cached_summary = chat_row.get("summary")
-    summary_message_count = chat_row.get("summary_message_count", 0)
+    summary_message_count = chat_row.get("summary_message_count") or 0
 
     messages_res = await db.query("SELECT * FROM messages WHERE chat_id = $1 ORDER BY created_at ASC", [chat_id])
     messages = messages_res["rows"]
@@ -68,13 +68,35 @@ async def get_conversation_context(chat_id: str, max_chars: int = 3000) -> str:
                 [summary, len(messages), chat_id],
             )
 
+    # Vector search over older messages if query is provided and we have > 5 messages
+    vector_retrieved_turns = []
+    if query and len(messages) > 5:
+        try:
+            from ..rag import generate_embedding, cosine_similarity
+            query_vec = await generate_embedding(query)
+            older_messages = messages[:-5]
+            scored = []
+            for m in older_messages:
+                content = m.get("content", "")
+                if content:
+                    emb = await generate_embedding(content[:300])
+                    sim = cosine_similarity(query_vec, emb)
+                    if sim > 0.3:
+                        scored.append((sim, f"{m['role']}: {content}"))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            vector_retrieved_turns = [item[1] for item in scored[:3]]
+        except Exception as v_err:
+            logger.warn("vector_chat_search_failed", {"error": str(v_err)})
+
     recent_messages = [{"content": f"{m['role']}: {m['content']}"} for m in messages[-5:]]
-    recent_budget = max_chars - len(summary) - 50 if summary else max_chars
+    recent_budget = max_chars - len(summary or "") - 50
     recent_kept = compress_context(recent_messages, max(recent_budget, 0))
 
     blocks = []
     if summary:
         blocks.append(f"[Earlier in this conversation]\n{summary}")
+    if vector_retrieved_turns:
+        blocks.append("[Relevant past context (Vector Search)]\n" + "\n".join(vector_retrieved_turns))
     if recent_kept:
         blocks.append("[Recent messages]\n" + "\n".join(m["content"] for m in recent_kept))
 
@@ -83,6 +105,7 @@ async def get_conversation_context(chat_id: str, max_chars: int = 3000) -> str:
         "chatId": chat_id,
         "totalMessages": len(messages),
         "hasSummary": bool(summary),
+        "vectorRetrievedCount": len(vector_retrieved_turns),
         "estimatedTokens": estimate_tokens(context_text),
     })
     return context_text

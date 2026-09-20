@@ -6,11 +6,11 @@ from pydantic import BaseModel
 
 from ..agents.code_agent import CodeAgent
 from ..agents.planner_agent import PlannerAgent
-from ..agents.review_agent import ReviewAgent
+from ..agents.validation_agent import ValidationAgent
 
 router = APIRouter()
 code_agent = CodeAgent()
-review_agent = ReviewAgent()
+validation_agent = ValidationAgent()
 planner_agent = PlannerAgent()
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
@@ -84,7 +84,7 @@ async def nova_task(body: NovaTaskBody):
         # Keep generated files in-memory only — never write generated answers/code to project files
         generated_files = [_format_in_memory_file(f["path"], f["content"]) for f in extracted]
 
-        critique = await review_agent.critique(answer, question=body.prompt, evidence_summary=body.prompt, contradictions=[])
+        critique = await validation_agent.critique(answer, question=body.prompt, evidence_summary=body.prompt, contradictions=[])
 
         return {
             "task": body.prompt,

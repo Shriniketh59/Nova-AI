@@ -385,15 +385,10 @@ async def orchestrate_stream(
                 queue.put_nowait(tok)
 
             gen_task = asyncio.create_task(agent.run_stream(query, on_token))
-            while not gen_task.done():
-                try:
-                    tok = await asyncio.wait_for(queue.get(), timeout=0.1)
-                    accumulated = tok
-                    yield {"token": tok}
-                except asyncio.TimeoutError:
-                    continue
-            while not queue.empty():
-                tok = queue.get_nowait()
+            # Cancels gen_task if the consumer stops early (client abort), so
+            # code generation doesn't keep running server-side unseen.
+            from ..utils.stream_cancel import drain_task_queue
+            async for tok in drain_task_queue(gen_task, queue):
                 accumulated = tok
                 yield {"token": tok}
             await gen_task
@@ -461,6 +456,19 @@ async def orchestrate_stream(
             cleaned = _strip_cutoff_sentences(full_text)
             if cleaned and cleaned != full_text:
                 yield {"replace": cleaned}
+                full_text = cleaned
+
+        # 9. Grounding check — advisory. Logs when an answer ignores the
+        # evidence it was given, or confidently answers a factual/current
+        # question with no evidence at all. Never blocks or rewrites.
+        from .answer_validator import validate_answer
+        validation = validate_answer(
+            query=query,
+            answer=full_text,
+            evidence_text=context_text,
+            web_sources=web_sources,
+            is_voice=is_voice,
+        )
 
         # Record daily token usage asynchronously
         asyncio.create_task(token_budget_service.record_usage(user_id, prompt_tokens, completion_tokens))
@@ -473,6 +481,8 @@ async def orchestrate_stream(
             "context_chars": len(context_text),
             "memories_count": len(user_memories),
             "completion_tokens": completion_tokens,
+            "grounded": validation.grounded,
+            "validation_warnings": validation.warnings,
         })
         yield {"done": True}
 

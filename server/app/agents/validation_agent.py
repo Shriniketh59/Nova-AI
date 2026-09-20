@@ -3,7 +3,7 @@ import re
 
 import httpx
 
-from ..core.config import OLLAMA_URL, OLLAMA_MODEL
+from ..core.config import OLLAMA_URL, OLLAMA_MODEL, get_ollama_options
 from ..rag import cosine_similarity
 from .base_agent import BaseAgent
 
@@ -89,12 +89,12 @@ def _detect_conflict(chunks: list[dict]) -> dict:
     return {"found": False, "detail": None}
 
 
-class ReviewAgent(BaseAgent):
+class ValidationAgent(BaseAgent):
     """Final decision-making step: Question -> Retrieve -> Validate -> Compare
     -> Generate -> Review -> Return."""
 
     def __init__(self):
-        super().__init__("ReviewAgent")
+        super().__init__("ValidationAgent")
 
     async def run(self, answer: str, context: dict | None = None) -> dict:
         context = context or {}
@@ -126,7 +126,7 @@ class ReviewAgent(BaseAgent):
         }
 
     async def critique(self, answer: str, question: str, evidence_summary: str = "", contradictions: list | None = None, domain: str = "document") -> dict:
-        """Real LLM-judge critique for the critical-thinking pipeline (SupervisorAgent)."""
+        """Real LLM-judge critique for the critical-thinking pipeline (ToolAgent)."""
         contradictions = contradictions or []
         is_code = domain == "code"
         if is_code:
@@ -145,7 +145,7 @@ class ReviewAgent(BaseAgent):
                     json={
                         "model": OLLAMA_MODEL,
                         "stream": False,
-                        "options": {"temperature": 0.1},
+                        "options": get_ollama_options({"temperature": 0.1}),
                         "messages": [
                             {"role": "system", "content": CODE_CRITIQUE_SYSTEM_PROMPT if is_code else CRITIQUE_SYSTEM_PROMPT},
                             {"role": "user", "content": user_content},

@@ -5,12 +5,12 @@ from typing import Callable
 import httpx
 
 from ..core.config import (
-    OLLAMA_URL, OLLAMA_CODE_MODEL, CODE_LLM_REVIEW, CODE_NUM_PREDICT, MAX_CONTINUATIONS,
+    OLLAMA_URL, OLLAMA_CODE_MODEL, CODE_LLM_REVIEW, CODE_NUM_PREDICT, MAX_CONTINUATIONS, get_ollama_options,
 )
 from ..utils.completion_guard import is_truncated, close_unbalanced_fences
 from ..utils.code_validation import quick_validate_code
 from .base_agent import BaseAgent
-from .review_agent import ReviewAgent
+from .validation_agent import ValidationAgent
 
 MAX_REGENERATIONS = 1
 
@@ -100,13 +100,65 @@ def _confidence_from_validation(validation: dict, regenerated: bool) -> dict:
     return {"score": 65, "label": "medium", "reason": f"Validation still flags: {'; '.join(validation['issues'])} — review before using in production."}
 
 
+# Questions about a specific library/framework/API benefit from real
+# documentation; self-contained algorithm questions ("reverse a linked list")
+# do not, and a retrieval round-trip would only add latency.
+LIBRARY_DOC_RE = re.compile(
+    r"\b("
+    r"react|next\.?js|vue|svelte|angular|node\.?js|express|fastapi|flask|django|"
+    r"spring|rails|laravel|pandas|numpy|pytorch|tensorflow|scikit-?learn|"
+    r"sqlalchemy|prisma|mongoose|axios|requests|httpx|pydantic|tailwind|"
+    r"docker|kubernetes|terraform|graphql|websocket|oauth|jwt|"
+    r"\bapi\b|\bsdk\b|\blibrary\b|\bframework\b|\bpackage\b|\bendpoint\b|"
+    r"how\s+do\s+i\s+use|documentation|docs\s+for|latest\s+version|deprecated"
+    r")\b",
+    re.I,
+)
+
+MAX_DOC_CONTEXT_CHARS = 2500
+
+
+def _build_doc_grounded_prompt(question: str, doc_context: str) -> str:
+    return (
+        f"{question}\n\n"
+        f"[RETRIEVED LIBRARY/API DOCUMENTATION]\n{doc_context}\n\n"
+        f"Instruction: Where the documentation above is relevant, ground your code in it — "
+        f"use the real API surface, signatures and version-appropriate idioms it shows, "
+        f"rather than recalling them from memory. Ignore any part of it that does not "
+        f"apply to the question."
+    )
+
+
 class CodeAgent(BaseAgent):
-    """Coding fast path: Question -> Code Agent -> Quick Validation -> Response.
-    Deliberately bypasses Research/Planner/Review."""
+    """Coding path: Question -> [documentation retrieval] -> Code Agent ->
+    Quick Validation -> Response.
+
+    Deliberately bypasses Research/Planner/Review for latency, but framework/
+    API questions still go through the shared retrieval pipeline first so the
+    generated code is grounded in real documentation instead of the model's
+    recollection of it."""
 
     def __init__(self):
         super().__init__("CodeAgent")
-        self.review_agent = ReviewAgent()
+        self.validation_agent = ValidationAgent()
+
+    async def _retrieve_documentation(self, question: str) -> str:
+        """Fetch library/API documentation through the same retrieval pipeline
+        the rest of the app uses (vector DB + web). Returns "" when the
+        question doesn't warrant it or retrieval fails — code generation must
+        never be blocked by a retrieval problem."""
+        if not LIBRARY_DOC_RE.search(question):
+            return ""
+        try:
+            from ..retrieval.retrieval_service import retrieve
+
+            result = await retrieve(question, top_k=4, include_web=True)
+            return (result.get("contextText") or "")[:MAX_DOC_CONTEXT_CHARS]
+        except Exception as err:
+            from ..core.logger import logger
+
+            logger.warn("code_agent.doc_retrieval_failed", {"error": str(err)})
+            return ""
 
     async def run(self, question: str, context: dict | None = None) -> dict:
         result = await self.run_stream(question, lambda token: None)
@@ -124,7 +176,13 @@ class CodeAgent(BaseAgent):
         system_prompt = LEETCODE_SYSTEM_PROMPT if DSA_RE.search(question) else CODE_SYSTEM_PROMPT
         regenerated = False
 
-        answer = await self._generate_once(system_prompt, question, on_token)
+        # Evidence-first: retrieve documentation BEFORE generating, so the
+        # model writes against real API surfaces rather than being asked to
+        # justify code it already produced.
+        doc_context = await self._retrieve_documentation(question)
+        generation_prompt = _build_doc_grounded_prompt(question, doc_context) if doc_context else question
+
+        answer = await self._generate_once(system_prompt, generation_prompt, on_token)
         validation = self._validate(answer)
 
         if not validation["pass"]:
@@ -141,7 +199,7 @@ class CodeAgent(BaseAgent):
         confidence = _confidence_from_validation(validation, regenerated)
 
         if CODE_LLM_REVIEW and validation["pass"]:
-            code_critique = await self.review_agent.critique(answer, question, domain="code")
+            code_critique = await self.validation_agent.critique(answer, question, domain="code")
             if not code_critique["pass"]:
                 validation = {**validation, "pass": False, "issues": [*validation["issues"], *code_critique["issues"]]}
                 score = min(confidence["score"], code_critique["confidenceScore"])
@@ -178,7 +236,7 @@ class CodeAgent(BaseAgent):
                         "model": OLLAMA_CODE_MODEL,
                         "stream": True,
                         "messages": convo,
-                        "options": {"temperature": 0.2, "top_p": 0.9, "num_predict": CODE_NUM_PREDICT},
+                        "options": get_ollama_options({"temperature": 0.2, "top_p": 0.9, "num_predict": CODE_NUM_PREDICT}),
                     },
                 ) as res:
                     if res.status_code >= 400:
@@ -206,21 +264,24 @@ class CodeAgent(BaseAgent):
         return close_unbalanced_fences(answer)
 
     async def _fix(self, system_prompt: str, answer: str, issues: list[str]):
-        async with httpx.AsyncClient(timeout=180) as client:
-            res = await client.post(
-                f"{OLLAMA_URL}/api/chat",
-                json={
-                    "model": OLLAMA_CODE_MODEL,
-                    "stream": False,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": _build_fix_prompt(answer, issues)},
-                    ],
-                    "options": {"temperature": 0.2, "top_p": 0.9, "num_predict": CODE_NUM_PREDICT},
-                },
-            )
-            if res.status_code >= 400:
-                return None
-            data = res.json()
-            fixed = (data.get("message") or {}).get("content", "")
-            return close_unbalanced_fences(fixed) if fixed else None
+        try:
+            async with httpx.AsyncClient(timeout=180) as client:
+                res = await client.post(
+                    f"{OLLAMA_URL}/api/chat",
+                    json={
+                        "model": OLLAMA_CODE_MODEL,
+                        "stream": False,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": _build_fix_prompt(answer, issues)},
+                        ],
+                        "options": get_ollama_options({"temperature": 0.2, "top_p": 0.9, "num_predict": CODE_NUM_PREDICT}),
+                    },
+                )
+                if res.status_code >= 400:
+                    return None
+                data = res.json()
+                fixed = (data.get("message") or {}).get("content", "")
+                return close_unbalanced_fences(fixed) if fixed else None
+        except Exception:
+            return None

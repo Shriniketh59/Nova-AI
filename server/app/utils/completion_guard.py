@@ -2,7 +2,7 @@ import re
 
 import httpx
 
-from ..core.config import OLLAMA_URL, MAX_CONTINUATIONS
+from ..core.config import OLLAMA_URL, MAX_CONTINUATIONS, get_ollama_options
 
 REQUIRED_SECTIONS = ["Direct Answer", "Detailed Explanation", "Key Findings", "Conclusion"]
 
@@ -71,7 +71,7 @@ async def generate_with_continuation(
                 json={
                     "model": model,
                     "stream": False,
-                    "options": {"temperature": temperature, "num_predict": num_predict},
+                    "options": get_ollama_options({"temperature": temperature, "num_predict": num_predict}),
                     "messages": convo,
                 },
             )
@@ -93,3 +93,4 @@ async def generate_with_continuation(
             ]
 
     return close_unbalanced_fences(answer)
+

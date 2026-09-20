@@ -113,7 +113,7 @@ async def test_acceptance_end_to_end_scenarios():
     fake_code_answer = "```python\n# FILE: test_generated.py\nprint('hello world')\n```"
     with patch("app.routes.nova_route.planner_agent.run", AsyncMock(return_value={"output": {"intent": "code", "steps": []}})), \
          patch("app.routes.nova_route.code_agent.run", AsyncMock(return_value={"output": {"answer": fake_code_answer}})), \
-         patch("app.routes.nova_route.review_agent.critique", AsyncMock(return_value={"pass": True, "issues": [], "confidenceScore": 95})):
+         patch("app.routes.nova_route.validation_agent.critique", AsyncMock(return_value={"pass": True, "issues": [], "confidenceScore": 95})):
 
         task_res = await nova_task(NovaTaskBody(prompt="generate code"))
         assert len(task_res["files"]) == 1

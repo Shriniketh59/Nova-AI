@@ -1,9 +1,17 @@
 import os
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from ..middleware.auth_middleware import get_current_user
+
 router = APIRouter()
+
+# NOTE: these routes expose raw filesystem read/write access to the project
+# tree. They are intended as a local IDE/dev tool, not a public API surface —
+# but they must still require an authenticated session so they can't be hit
+# by an unauthenticated caller if this server is ever reachable over a
+# network (e.g. dev server bound to 0.0.0.0, or deployed as-is).
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
 IGNORE = {"node_modules", ".git", "dist", "uploads", "qdrant"}
@@ -35,7 +43,7 @@ def _build_tree(dir_abs: str, rel_path: str = "") -> list[dict]:
 
 
 @router.get("/api/fs/tree")
-async def get_tree():
+async def get_tree(current_user: dict = Depends(get_current_user)):
     try:
         tree = _build_tree(PROJECT_ROOT)
         return {"name": os.path.basename(PROJECT_ROOT), "path": "", "type": "dir", "children": tree}
@@ -44,7 +52,7 @@ async def get_tree():
 
 
 @router.get("/api/fs/file")
-async def get_file(path: str = Query(...)):
+async def get_file(path: str = Query(...), current_user: dict = Depends(get_current_user)):
     try:
         target = _resolve_safe(path)
         with open(target, "r", encoding="utf-8") as f:
@@ -60,7 +68,7 @@ class WriteFileBody(BaseModel):
 
 
 @router.put("/api/fs/file")
-async def write_file(body: WriteFileBody):
+async def write_file(body: WriteFileBody, current_user: dict = Depends(get_current_user)):
     try:
         target = _resolve_safe(body.path)
         with open(target, "w", encoding="utf-8") as f:

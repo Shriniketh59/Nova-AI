@@ -18,7 +18,7 @@ _log = logging.getLogger("nova.voice_service")
 
 def _clean_for_tts(text: str) -> str:
     """
-    Format text for Siri-like human conversational speech:
+    Format text for natural human conversational speech:
     - Strips code blocks and replaces with polite audio phrase
     - Strips markdown formatting, links, and symbols
     - Replaces headings with sentence breaks for natural pause
@@ -71,7 +71,7 @@ async def generate_voice_reply_local(
     """
     Generate a spoken reply using:
     1. Local Orchestrator (Llama 3.2 via Ollama)
-    2. Local TTS (Siri-grade neural speech)
+    2. Local TTS (pyttsx3 / espeak-ng — fully offline)
 
     Returns:
         {
@@ -117,7 +117,11 @@ async def generate_voice_reply_local(
 
 
 async def synthesize_speech(text: str, voice: Optional[str] = None) -> tuple[bytes, str]:
-    """Convert text to crystal-clear speech bytes and mime-type with Siri neural voice."""
+    """Convert text to speech bytes + mime-type using the local offline engine.
+
+    Raises TTSUnavailableError when no local speech engine/voice is installed,
+    so callers can surface a real error state instead of silent failure.
+    """
     from .local_tts import get_tts
     tts = get_tts()
     return await tts.synthesize_with_mime(text, voice=voice)

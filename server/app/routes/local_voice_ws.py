@@ -37,6 +37,7 @@ from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from ..core.logger import logger
+from ..voice.local_tts import DEFAULT_VOICE_KEY, get_tts
 
 router = APIRouter()
 _log = logging.getLogger("nova.voice_ws")
@@ -56,7 +57,7 @@ async def local_voice_ws(websocket: WebSocket):
     """
     await websocket.accept()
     chat_id = websocket.query_params.get("chatId", "")
-    selected_voice = websocket.query_params.get("voice", "en-US-AvaNeural")
+    selected_voice = websocket.query_params.get("voice", "") or DEFAULT_VOICE_KEY
 
     conversation_history: list[dict] = []
     audio_buffer = bytearray()
@@ -70,6 +71,17 @@ async def local_voice_ws(websocket: WebSocket):
             pass
 
     await safe_send({"type": "ready", "voice": selected_voice})
+
+    # Report a missing local speech engine up front rather than only when the
+    # first reply is ready to be spoken.
+    tts_status = get_tts().get_status()
+    if not tts_status["available"]:
+        await safe_send({
+            "type": "error",
+            "code": "tts_unavailable",
+            "message": tts_status["error"] or "Local text-to-speech is unavailable.",
+        })
+
     await safe_send({"type": "listening"})
 
     async def handle_turn(transcript: str):
@@ -130,9 +142,21 @@ async def local_voice_ws(websocket: WebSocket):
         is_speaking = True
         await safe_send({"type": "speaking"})
 
+        from ..voice.local_tts import TTSUnavailableError
         from ..voice.local_voice_service import synthesize_speech, _clean_for_tts
         tts_text = _clean_for_tts(full_text) or full_text
-        res = await synthesize_speech(tts_text, voice=selected_voice)
+        try:
+            res = await synthesize_speech(tts_text, voice=selected_voice)
+        except TTSUnavailableError as e:
+            # No local speech engine/voice on this host. Surface a clear ERROR
+            # through the state machine — the turn's text has already been
+            # streamed, so the conversation stays usable without audio.
+            logger.error("voice_ws.tts_unavailable", {"error": str(e)})
+            is_speaking = False
+            await safe_send({"type": "error", "message": str(e), "code": "tts_unavailable"})
+            await safe_send({"type": "done"})
+            await safe_send({"type": "listening"})
+            return
         if isinstance(res, tuple):
             wav_bytes, mime_type = res
         else:

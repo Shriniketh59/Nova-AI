@@ -7,11 +7,10 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from ..core import db
-from ..core.config import QDRANT_URL
+from ..retrieval.vector_store import get_vector_store, vector_store_enabled
 from ..core.logger import logger
 from ..rag import generate_embedding
-from ..retrieval.qdrant_client import COLLECTIONS, upsert_points
-from ..retrieval.vector_store import get_vector_store
+from ..retrieval.qdrant_client import COLLECTIONS
 from .cleaning import clean_content, compute_content_hash, validate_document_quality
 from .chunking import split_structured_text
 from .document_schema import (
@@ -185,7 +184,7 @@ class DataRefreshManager:
                 "content_hash": chunk.content_hash,
             }
 
-            if QDRANT_URL:
+            if vector_store_enabled():
                 points_to_upsert.append({
                     "id": chunk.chunk_id,
                     "vector": chunk_embedding,
@@ -199,7 +198,7 @@ class DataRefreshManager:
                 })
 
         # 4. Clean up existing vectors for this document in Qdrant if updating
-        if existing_doc and QDRANT_URL:
+        if existing_doc and vector_store_enabled():
             try:
                 store = get_vector_store()
                 await store.delete(
@@ -210,9 +209,9 @@ class DataRefreshManager:
                 logger.warn("refresh_manager.qdrant_delete_failed", {"error": str(err)})
 
         # 5. Upsert new points into Qdrant
-        if points_to_upsert and QDRANT_URL:
+        if points_to_upsert and vector_store_enabled():
             try:
-                await upsert_points(COLLECTIONS["documents"]["name"], points_to_upsert)
+                await get_vector_store().upsert(COLLECTIONS["documents"]["name"], points_to_upsert)
             except Exception as err:
                 logger.error("refresh_manager.qdrant_upsert_failed", {"error": str(err)})
 

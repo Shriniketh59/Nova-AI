@@ -347,7 +347,7 @@ async def test_generated_output_not_written_to_project_files(app_client):
 
     with patch("app.routes.nova_route.planner_agent.run", AsyncMock(return_value={"output": {"intent": "code", "steps": []}})), \
          patch("app.routes.nova_route.code_agent.run", AsyncMock(return_value={"output": {"answer": fake_answer}})), \
-         patch("app.routes.nova_route.review_agent.critique", AsyncMock(return_value={"pass": True, "issues": [], "confidenceScore": 90})):
+         patch("app.routes.nova_route.validation_agent.critique", AsyncMock(return_value={"pass": True, "issues": [], "confidenceScore": 90})):
 
         body = NovaTaskBody(prompt="Write solver.py")
         res = await nova_task(body)

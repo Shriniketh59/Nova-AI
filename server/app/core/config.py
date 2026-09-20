@@ -24,6 +24,18 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
 OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "all-minilm:latest")
 OLLAMA_CODE_MODEL = os.environ.get("OLLAMA_CODE_MODEL", "qwen2.5-coder:1.5b")
+OLLAMA_NUM_THREAD = _int("OLLAMA_NUM_THREAD", os.cpu_count() or 4)
+
+
+def get_ollama_options(extra_options: dict | None = None) -> dict:
+    opts = {
+        "num_gpu": 0,
+        "num_thread": OLLAMA_NUM_THREAD,
+    }
+    if extra_options:
+        opts.update(extra_options)
+    return opts
+
 
 CODE_LLM_REVIEW = os.environ.get("CODE_LLM_REVIEW", "false").lower() == "true"
 CODE_NUM_PREDICT = _int("CODE_NUM_PREDICT", 4096)
@@ -46,7 +58,22 @@ WEB_RETRIEVER_PROVIDER = os.environ.get("WEB_RETRIEVER_PROVIDER", "ddgs")
 
 # Which VectorStore implementation the retrieval layer should use.
 # See app/retrieval/vector_store.py for the abstraction and factory.
-VECTOR_STORE_BACKEND = os.environ.get("VECTOR_STORE_BACKEND", "qdrant").lower()
+#
+# ChromaDB is the default: it is a fully local, embedded, persistent vector
+# store (no server process, no network, no API key), which matches Nova's
+# "everything runs locally / offline" requirement. Qdrant remains fully
+# implemented and selectable via VECTOR_STORE_BACKEND=qdrant (it additionally
+# needs QDRANT_URL pointing at a running Qdrant instance).
+#
+# NOTE: switching backends does NOT migrate existing vectors. Documents that
+# were indexed into Qdrant must be re-indexed to appear in Chroma (see
+# server/scripts/backfill_qdrant.py for the equivalent Qdrant-side script).
+VECTOR_STORE_BACKEND = os.environ.get("VECTOR_STORE_BACKEND", "chroma").lower()
+
+# On-disk location for the embedded ChromaDB persistent client.
+CHROMA_PATH = os.environ.get(
+    "CHROMA_PATH", os.path.join(_ROOT_DIR, "server", "data", "chroma")
+)
 
 DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000000"
 
@@ -55,6 +82,14 @@ JWT_SECRET = os.environ.get("JWT_SECRET", "nova-ai-jwt-super-secret-key-change-i
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRES_DAYS = _int("JWT_EXPIRES_DAYS", 30)
 AUTH_COOKIE_NAME = "nova_session"
+CSRF_COOKIE_NAME = "csrf_token"
+
+# Whether auth/CSRF cookies get the `Secure` flag (HTTPS-only). Cookies with
+# Secure set are silently dropped by browsers over plain HTTP, so this
+# defaults to False for local dev and turns on automatically in production,
+# or can be forced via COOKIE_SECURE=true (e.g. HTTPS behind a proxy in a
+# non-"production" NODE_ENV).
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "").lower() == "true" or os.environ.get("NODE_ENV", "development") == "production"
 
 # Google OAuth Settings
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
