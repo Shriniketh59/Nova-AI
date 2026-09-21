@@ -53,6 +53,24 @@ RAG_MAX_CONTEXT_CHARS = _int("RAG_MAX_CONTEXT_CHARS", 6000)
 RETRIEVAL_CACHE_TTL_MS = _int("RETRIEVAL_CACHE_TTL_MS", 60000)
 EMBEDDING_CACHE_TTL_MS = _int("EMBEDDING_CACHE_TTL_MS", 86400000)
 
+# Corrective RAG loop bounds and thresholds. Centralized here (rather than
+# hardcoded module-level constants scattered across tool_agent.py,
+# research_agent.py, validation_agent.py) so the corrective loop's tunables
+# are auditable in one place for the paper's methodology section. Defaults
+# match the values these modules already used before consolidation.
+MAX_REGENERATION_ATTEMPTS = _int("MAX_REGENERATION_ATTEMPTS", 1)
+MAX_EVIDENCE_ESCALATIONS = _int("MAX_EVIDENCE_ESCALATIONS", 1)
+MAX_CORRECTIVE_RETRIES = _int("MAX_CORRECTIVE_RETRIES", 1)
+CONTRADICTION_THRESHOLD = float(os.environ.get("CONTRADICTION_THRESHOLD", 0.3))
+MIN_EVIDENCE_OVERLAP = float(os.environ.get("MIN_EVIDENCE_OVERLAP", 0.08))
+# Distinct from MIN_EVIDENCE_OVERLAP: this is the claim-token grounding ratio
+# used by ValidationAgent.critique() (capitalized-word/number overlap), a
+# stricter, differently-computed signal than the content-word overlap check
+# below — do not merge the two, their defaults are intentionally different.
+MIN_GROUNDING_RATIO = float(os.environ.get("MIN_GROUNDING_RATIO", 0.4))
+RELEVANCE_THRESHOLD = float(os.environ.get("RELEVANCE_THRESHOLD", 0.2))
+STALENESS_HALF_LIFE_DAYS = float(os.environ.get("STALENESS_HALF_LIFE_DAYS", 60.0))
+
 QDRANT_URL = os.environ.get("QDRANT_URL")
 
 # Web retrieval provider: ddgs (default, no API key), tavily, exa, firecrawl

@@ -1,6 +1,6 @@
 import time
 
-from ..core.config import OLLAMA_MODEL
+from ..core.config import OLLAMA_MODEL, MAX_REGENERATION_ATTEMPTS, MAX_EVIDENCE_ESCALATIONS
 from ..core.logger import logger
 from ..services.task_router import classify_topic
 from ..utils.completion_guard import generate_with_continuation
@@ -10,9 +10,6 @@ from .memory_agent import memory_agent
 from .planner_agent import PlannerAgent
 from .research_agent import ResearchAgent
 from .validation_agent import ValidationAgent
-
-MAX_REGENERATION_ATTEMPTS = 1
-MAX_EVIDENCE_ESCALATIONS = 1
 
 VERIFICATION_FAILURE_MESSAGE = "I couldn't verify this information from reliable sources."
 

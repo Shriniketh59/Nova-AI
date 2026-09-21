@@ -407,7 +407,54 @@ async def orchestrate_stream(
             yield {"done": True}
             return
 
-        # 5. Follow-up evaluation: isolate unrelated queries
+        # 5. Text chat for factual/document intents goes through the same
+        # hard-gated corrective pipeline as /api/agent/chat (ToolAgent:
+        # plan -> memory -> research [corrective retrieval] -> reason ->
+        # review -> correct-or-regenerate) instead of a single ungated
+        # generation pass. This closes the gap where most turns previously
+        # only got an advisory (log-only) grounding check. The answer is
+        # computed non-streaming, then emitted in chunks to preserve the
+        # existing SSE {"token": ...} contract the frontend already expects.
+        #
+        # Voice stays on the fast single-pass path below: a live spoken
+        # turn can't absorb a corrective-retrieval/regeneration loop without
+        # breaking the conversational cadence, so it keeps the advisory
+        # grounding check instead — see answer_validator.py.
+        if not is_voice:
+            from ..agents.tool_agent import ToolAgent
+            tool_agent = ToolAgent()
+            result = await tool_agent.run(query, {
+                "chatId": chat_id,
+                "hasFiles": has_files,
+                "userId": user_id,
+            })
+            output = result["output"]
+            full_text = output["answer"]
+            evidence = output["evidence"]
+
+            yield {"sources": evidence}
+            chunk_size = 40
+            for i in range(0, len(full_text), chunk_size):
+                yield {"token": full_text[i:i + chunk_size]}
+
+            prompt_tokens = token_budget_service.estimate_tokens(query)
+            completion_tokens = max(1, len(full_text) // 4)
+            asyncio.create_task(token_budget_service.record_usage(user_id, prompt_tokens, completion_tokens))
+
+            elapsed_ms = round((time.perf_counter() - t0) * 1000)
+            logger.info("orchestrator.complete", {
+                "intent": intent,
+                "elapsed_ms": elapsed_ms,
+                "source_count": output["sourceCount"],
+                "completion_tokens": completion_tokens,
+                "confidence": output["confidence"],
+                "regenerated": output["regenerated"],
+                "reviewIssues": output["reviewIssues"],
+            })
+            yield {"done": True}
+            return
+
+        # 5b. Voice fast path — follow-up evaluation: isolate unrelated queries
         from .context_filter import detect_follow_up
         is_follow_up, conversation_context, meta = detect_follow_up(query, conversation_history)
         logger.info("orchestrator.follow_up", {
@@ -470,9 +517,10 @@ async def orchestrate_stream(
                 yield {"replace": cleaned}
                 full_text = cleaned
 
-        # 9. Grounding check — advisory. Logs when an answer ignores the
-        # evidence it was given, or confidently answers a factual/current
-        # question with no evidence at all. Never blocks or rewrites.
+        # 9. Grounding check — advisory, voice-only (see note at step 5).
+        # Logs when an answer ignores the evidence it was given, or
+        # confidently answers a factual/current question with no evidence
+        # at all. Never blocks or rewrites.
         from .answer_validator import validate_answer
         validation = validate_answer(
             query=query,

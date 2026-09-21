@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from ..core.config import OLLAMA_URL, OLLAMA_MODEL, get_ollama_options
+from ..core.config import OLLAMA_URL, OLLAMA_MODEL, get_ollama_options, MIN_GROUNDING_RATIO
 from ..rag import cosine_similarity, generate_embedding
 from .base_agent import BaseAgent
 
@@ -63,7 +63,6 @@ _SENTENCE_STARTERS = {
     "Direct", "Answer", "Detailed", "Explanation", "Key", "Findings", "Conclusion",
     "A", "An", "If", "So", "But", "And", "Question",
 }
-MIN_GROUNDING_RATIO = 0.4
 MIN_CLAIM_TOKENS_TO_CHECK = 2
 
 
@@ -85,6 +84,40 @@ def _grounding_ratio(answer: str, evidence_summary: str) -> tuple[float, int]:
 
 def _no_evidence(evidence_summary: str) -> bool:
     return not evidence_summary or evidence_summary.strip().startswith(NO_EVIDENCE_PREFIX)
+
+
+# Claim-level validation: split the answer into individual claims (not one
+# whole-answer ratio) and grade each against the evidence separately, so a
+# single fabricated sentence in an otherwise well-grounded answer gets
+# caught instead of being averaged away.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z(])")
+
+
+def extract_claims(answer: str) -> list[str]:
+    if not answer:
+        return []
+    lines = [ln.strip() for ln in answer.strip().splitlines()]
+    claims = []
+    for line in lines:
+        if not line or line.startswith("#") or line.startswith("-") and len(line) < 3:
+            continue
+        text = line[2:].strip() if line.startswith("- ") else line
+        claims.extend(p.strip() for p in _SENTENCE_SPLIT_RE.split(text) if p.strip())
+    return claims
+
+
+def match_claims_to_evidence(claims: list[str], evidence_summary: str) -> list[dict]:
+    evidence_lower = (evidence_summary or "").lower()
+    results = []
+    for claim in claims:
+        tokens = _extract_claim_tokens(claim)
+        if len(tokens) < MIN_CLAIM_TOKENS_TO_CHECK:
+            results.append({"claim": claim, "tokensChecked": len(tokens), "groundingRatio": 1.0, "supported": True})
+            continue
+        present = sum(1 for t in tokens if t.lower() in evidence_lower)
+        ratio = present / len(tokens)
+        results.append({"claim": claim, "tokensChecked": len(tokens), "groundingRatio": round(ratio, 2), "supported": ratio >= MIN_GROUNDING_RATIO})
+    return results
 
 
 # Temporal-status mismatch: an answer using forecast/future language for an
@@ -272,6 +305,23 @@ class ValidationAgent(BaseAgent):
                     "confidenceReason": "Answer tense conflicts with evidence showing the event already completed.",
                 }
 
+        claim_matches = match_claims_to_evidence(extract_claims(answer), evidence_summary) if not is_code else []
+        if not is_code:
+            unsupported = [m for m in claim_matches if m["tokensChecked"] >= MIN_CLAIM_TOKENS_TO_CHECK and not m["supported"]]
+            if unsupported:
+                return {
+                    "pass": False,
+                    "issues": [
+                        f"unsupported_claim: \"{m['claim'][:100]}\" — {m['groundingRatio']:.0%} of its asserted "
+                        f"names/dates/numbers appear in the evidence"
+                        for m in unsupported[:3]
+                    ],
+                    "needsMoreEvidence": True,
+                    "confidenceScore": 20,
+                    "confidenceReason": f"{len(unsupported)}/{len(claim_matches)} claims lack evidence support.",
+                    "claims": claim_matches,
+                }
+
         if is_code:
             user_content = f"Question: {question}\n\nCode answer to review:\n{answer}"
         else:
@@ -312,4 +362,5 @@ class ValidationAgent(BaseAgent):
             existing_reason = result.get("confidenceReason") or ""
             result["confidenceReason"] = f"{existing_reason} {disputed_note}".strip()
 
+        result["claims"] = claim_matches
         return result

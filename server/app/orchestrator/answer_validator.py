@@ -1,23 +1,30 @@
-"""Lightweight post-generation grounding check.
+"""Lightweight post-generation grounding check — voice path only.
 
-Runs after the model finishes but before the turn is considered complete. It
-is deliberately *advisory*: it logs a warning and returns a verdict, and never
-blocks or rewrites an answer. The goal is observability — surfacing the two
-failure modes that matter for a retrieval-grounded assistant:
+Text chat now runs through ValidationAgent.critique()'s hard-gated
+corrective pipeline (see local_orchestrator.orchestrate_stream, step 5),
+which blocks/regenerates on ungrounded answers instead of only logging. This
+module remains the check for the voice path, which stays on a fast
+single-pass generation: a live spoken turn can't absorb a corrective-
+retrieval/regeneration loop without breaking the conversational cadence, so
+it keeps this deliberately *advisory* check instead — it logs a warning and
+returns a verdict, but never blocks or rewrites an answer. The goal is
+observability — surfacing the two failure modes that matter for a
+retrieval-grounded assistant:
 
   1. Evidence was retrieved, but the answer ignores it (possible fabrication
      despite having sources on hand).
   2. No evidence was found at all, yet the question asked for current or
      factual information and the answer states it confidently anyway.
 
-This is heuristic on purpose. A second LLM pass to grade every answer would
-roughly double latency on a small local box, which is the wrong trade for a
-check whose output is a log line.
+This is heuristic on purpose. A second LLM pass to grade every voice answer
+would roughly double latency on a small local box, which is the wrong trade
+for a check whose output is a log line.
 """
 
 import re
 from dataclasses import dataclass, field
 
+from ..core.config import MIN_EVIDENCE_OVERLAP
 from ..core.logger import logger
 
 # Questions whose answers depend on facts that change, or on a specific
@@ -55,9 +62,6 @@ STOPWORDS = {
     "here", "into", "about", "more", "most", "some", "such", "other", "over", "each",
 }
 
-# Below this share of overlapping content words, an answer is treated as not
-# visibly drawing on the evidence it was given.
-MIN_EVIDENCE_OVERLAP = 0.08
 
 
 @dataclass

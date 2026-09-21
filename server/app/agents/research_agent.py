@@ -3,14 +3,15 @@ import re
 
 import httpx
 
-from ..core.config import OLLAMA_URL
+from ..core.config import OLLAMA_URL, CONTRADICTION_THRESHOLD, MAX_CORRECTIVE_RETRIES
 from ..rag import generate_embedding, cosine_similarity
 from ..retrieval.retrieval_service import retrieve
 from ..retrieval.complexity import tier_for
 from ..retrieval.source_trust import rank_sources, count_trust_tiers
+from ..retrieval import relevance_gate
+from ..retrieval.source_attribution import attribute_sources
 from .base_agent import BaseAgent
-
-CONTRADICTION_THRESHOLD = 0.3
+from .validation_agent import _detect_conflict
 
 FORCE_WEB_SEARCH_CATEGORIES = {"biography", "politics", "medical", "legal", "finance", "news"}
 
@@ -122,6 +123,38 @@ async def _detect_contradictions(evidence: list[dict]) -> list[dict]:
     return contradictions
 
 
+async def _corrective_retrieve(question: str, chat_id: str, tier: dict, needs_doc_retrieval, category: str) -> tuple[dict, list[dict], dict]:
+    """Corrective-RAG retrieval step: retrieve, grade relevance, and — if
+    evidence is insufficient, mostly irrelevant, or stale where freshness
+    matters — retry once with a rewritten query and (if staleness was the
+    trigger) a forced web fallback. Bounded by MAX_CORRECTIVE_RETRIES so a
+    query with no good evidence anywhere fails fast instead of looping."""
+    if needs_doc_retrieval is False:
+        empty = {"chunks": [], "sources": [], "confidence": {"score": 0, "label": "low"}}
+        return empty, [], {"corrected": False, "retries": 0, "duplicatesDropped": 0}
+
+    doc_result = await retrieve(question, chat_id, top_k=tier["topK"])
+    graded = relevance_gate.grade_relevance(question, doc_result["chunks"])
+
+    retries = 0
+    corrected = False
+    while retries < MAX_CORRECTIVE_RETRIES:
+        insufficient, _usable = relevance_gate.detect_insufficient(graded, tier["minSources"])
+        stale_items = relevance_gate.detect_stale(graded, category, FORCE_WEB_SEARCH_CATEGORIES)
+        if not relevance_gate.needs_correction(insufficient, graded, stale_items):
+            break
+        retries += 1
+        corrected = True
+        retry_query = relevance_gate.rewrite_query(question)
+        doc_result = await retrieve(retry_query, chat_id, top_k=tier["minSources"] * 2, include_web=bool(stale_items))
+        graded = relevance_gate.grade_relevance(retry_query, doc_result["chunks"])
+
+    relevant_chunks = relevance_gate.filter_relevant(graded)
+    deduped_chunks, dropped_pairs = await relevance_gate.detect_duplicates(relevant_chunks)
+
+    return doc_result, deduped_chunks, {"corrected": corrected, "retries": retries, "duplicatesDropped": len(dropped_pairs)}
+
+
 class ResearchAgent(BaseAgent):
     """Second stage of the critical-thinking pipeline: RAG Retrieval + Evidence
     Analysis. Fans out to document retrieval AND web search in parallel, then
@@ -137,8 +170,9 @@ class ResearchAgent(BaseAgent):
         has_files = context.get("hasFiles", False)
         memories = context.get("memories", [])
         force_top_k = context.get("forceTopK")
+        category = plan.get("category") or "general"
 
-        force_web_search = plan.get("category") in FORCE_WEB_SEARCH_CATEGORIES
+        force_web_search = category in FORCE_WEB_SEARCH_CATEGORIES
         skip_web_search = (has_files and not force_web_search) or plan.get("taskType") == "greeting"
         tier = (
             {"topK": force_top_k, "minSources": tier_for(question)["minSources"]}
@@ -146,18 +180,17 @@ class ResearchAgent(BaseAgent):
             else tier_for(question)
         )
         try:
-            doc_task = (
-                retrieve(question, chat_id, top_k=tier["topK"])
-                if plan.get("needsDocRetrieval") is not False
-                else asyncio.sleep(0, result={"chunks": [], "sources": [], "contextText": "", "confidence": {"score": 0, "label": "low"}})
-            )
+            doc_task = _corrective_retrieve(question, chat_id, tier, plan.get("needsDocRetrieval"), category)
             web_task = _fetch_web_sources(question, tier["topK"]) if not skip_web_search else asyncio.sleep(0, result=[])
-            doc_result, web_sources = await asyncio.gather(doc_task, web_task)
+            (doc_result, doc_chunks, correction), web_sources = await asyncio.gather(doc_task, web_task)
+
+            doc_sources = attribute_sources(doc_chunks) if doc_chunks else []
+            conflict = await _detect_conflict(doc_chunks) if doc_chunks else {"found": False, "detail": None}
 
             ranked_web_sources = rank_sources(web_sources)
             doc_evidence = [
-                {**s, "snippet": (doc_result["chunks"][i].get("content", "")[:400] if i < len(doc_result["chunks"]) else "")}
-                for i, s in enumerate(doc_result["sources"])
+                {**s, "snippet": (doc_chunks[i].get("content", "")[:400] if i < len(doc_chunks) else "")}
+                for i, s in enumerate(doc_sources)
             ]
             web_evidence = [
                 {"title": s.get("title"), "type": "web", "url": s.get("url"), "snippet": s.get("snippet"), "trustTier": s.get("trustTier")}
@@ -175,6 +208,8 @@ class ResearchAgent(BaseAgent):
                 _detect_contradictions(evidence), asyncio.sleep(0, result=detect_fact_disagreements(evidence))
             )
             contradictions = [*embedding_contradictions, *fact_disagreements]
+            if conflict["found"]:
+                contradictions.append({"sourceA": "document evidence", "sourceB": "document evidence", "detail": conflict["detail"]})
 
             evidence_summary = (
                 "\n\n".join(f"[{i + 1}] ({e['type']}) {e.get('title') or e.get('filename')}: {e.get('snippet', '')}" for i, e in enumerate(evidence))
@@ -192,7 +227,8 @@ class ResearchAgent(BaseAgent):
                     "sourceCount": len(evidence),
                     "minSources": tier["minSources"],
                     "trustTiers": trust_tiers,
-                    "category": plan.get("category") or "general",
+                    "category": category,
+                    "correction": correction,
                 },
             }
         except Exception as err:
