@@ -278,6 +278,21 @@ def _build_messages(
 # Ollama streaming
 # ---------------------------------------------------------------------------
 
+async def generate_with_continuation_text(prompt: str, plan: dict) -> str:
+    """Non-streamed generation for the (uncommon) regeneration/escalation
+    passes after a rejected draft — these don't need to be perceived-fast
+    since they replace an already-visible answer rather than being the
+    user's first sight of any output."""
+    from ..utils.completion_guard import generate_with_continuation
+    return await generate_with_continuation(
+        [{"role": "user", "content": prompt}],
+        model=OLLAMA_MODEL,
+        num_predict=4096,
+        temperature=0.4,
+        require_sections=plan.get("taskType") != "greeting",
+    )
+
+
 async def _stream_ollama(
     messages: list[dict],
     model: str = None,
@@ -408,34 +423,84 @@ async def orchestrate_stream(
             return
 
         # 5. Text chat for factual/document intents goes through the same
-        # hard-gated corrective pipeline as /api/agent/chat (ToolAgent:
-        # plan -> memory -> research [corrective retrieval] -> reason ->
-        # review -> correct-or-regenerate) instead of a single ungated
-        # generation pass. This closes the gap where most turns previously
-        # only got an advisory (log-only) grounding check. The answer is
-        # computed non-streaming, then emitted in chunks to preserve the
-        # existing SSE {"token": ...} contract the frontend already expects.
+        # hard-gated pipeline as /api/agent/chat (plan -> memory -> research
+        # [corrective retrieval] -> reason -> review -> correct-or-
+        # regenerate), but the reasoning draft is STREAMED live instead of
+        # buffered until the whole answer + critique are done. Buffering the
+        # full ToolAgent.run() call (as this used to) means the user sees
+        # nothing until two full sequential LLM calls finish — on a
+        # CPU-only/low-RAM box that reads as "stuck", not just slower.
+        # Streaming the draft first restores the old perceived speed; the
+        # hard gate still runs after, and only replaces the visible answer
+        # (SSE {"replace": ...}, same mechanism already used for the
+        # cutoff-disclaimer strip below) on the minority of turns that
+        # actually need correction.
         #
         # Voice stays on the fast single-pass path below: a live spoken
         # turn can't absorb a corrective-retrieval/regeneration loop without
         # breaking the conversational cadence, so it keeps the advisory
         # grounding check instead — see answer_validator.py.
         if not is_voice:
-            from ..agents.tool_agent import ToolAgent
-            tool_agent = ToolAgent()
-            result = await tool_agent.run(query, {
-                "chatId": chat_id,
-                "hasFiles": has_files,
-                "userId": user_id,
-            })
-            output = result["output"]
-            full_text = output["answer"]
-            evidence = output["evidence"]
+            from ..agents.planner_agent import PlannerAgent
+            from ..agents.research_agent import ResearchAgent
+            from ..agents.validation_agent import ValidationAgent
+            from ..agents.tool_agent import (
+                _build_reasoning_prompt,
+                _build_verification_failure_answer,
+                MAX_REGENERATION_ATTEMPTS,
+                MAX_EVIDENCE_ESCALATIONS,
+            )
+            from ..agents.memory_agent import memory_agent
+
+            planner_result = await PlannerAgent().run(query, {})
+            plan = planner_result["output"]
+
+            try:
+                memories = await memory_agent.get_relevant_memories(chat_id, query, top_k=3, user_id=user_id)
+            except Exception:
+                memories = []
+
+            research = ResearchAgent()
+            research_result = await research.run(query, {"chatId": chat_id, "plan": plan, "hasFiles": has_files, "memories": memories})
+            r_out = research_result["output"]
+            evidence, evidence_summary, contradictions = r_out["evidence"], r_out["evidenceSummary"], r_out["contradictions"]
+            source_count, min_sources = r_out["sourceCount"], r_out["minSources"]
 
             yield {"sources": evidence}
-            chunk_size = 40
-            for i in range(0, len(full_text), chunk_size):
-                yield {"token": full_text[i:i + chunk_size]}
+
+            prompt = _build_reasoning_prompt(query, plan, evidence_summary, contradictions, memories, None)
+            full_text = ""
+            async for token in _stream_ollama([{"role": "user", "content": prompt}], max_tokens=MAX_TOKENS):
+                full_text += token
+                yield {"token": token}
+
+            review = ValidationAgent()
+            critique = await review.critique(full_text, query, evidence_summary, contradictions)
+
+            evidence_escalations = 0
+            while critique["needsMoreEvidence"] and source_count < min_sources and evidence_escalations < MAX_EVIDENCE_ESCALATIONS:
+                evidence_escalations += 1
+                research_result = await research.run(query, {"chatId": chat_id, "plan": plan, "hasFiles": has_files, "memories": memories, "forceTopK": min_sources * 2})
+                r_out = research_result["output"]
+                evidence, evidence_summary, contradictions = r_out["evidence"], r_out["evidenceSummary"], r_out["contradictions"]
+                source_count, min_sources = r_out["sourceCount"], r_out["minSources"]
+                prompt = _build_reasoning_prompt(query, plan, evidence_summary, contradictions, memories, None)
+                full_text = await generate_with_continuation_text(prompt, plan)
+                critique = await review.critique(full_text, query, evidence_summary, contradictions)
+
+            verification_failed = critique["needsMoreEvidence"] and source_count < min_sources and evidence_escalations >= MAX_EVIDENCE_ESCALATIONS
+            if verification_failed:
+                full_text = _build_verification_failure_answer(evidence)
+                yield {"replace": full_text}
+            else:
+                attempts = 0
+                while not critique["pass"] and attempts < MAX_REGENERATION_ATTEMPTS:
+                    attempts += 1
+                    prompt = _build_reasoning_prompt(query, plan, evidence_summary, contradictions, memories, "; ".join(critique["issues"]))
+                    full_text = await generate_with_continuation_text(prompt, plan)
+                    critique = await review.critique(full_text, query, evidence_summary, contradictions)
+                if attempts > 0:
+                    yield {"replace": full_text}
 
             prompt_tokens = token_budget_service.estimate_tokens(query)
             completion_tokens = max(1, len(full_text) // 4)
@@ -445,11 +510,9 @@ async def orchestrate_stream(
             logger.info("orchestrator.complete", {
                 "intent": intent,
                 "elapsed_ms": elapsed_ms,
-                "source_count": output["sourceCount"],
+                "source_count": source_count,
                 "completion_tokens": completion_tokens,
-                "confidence": output["confidence"],
-                "regenerated": output["regenerated"],
-                "reviewIssues": output["reviewIssues"],
+                "reviewIssues": critique["issues"],
             })
             yield {"done": True}
             return
