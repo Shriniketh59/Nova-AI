@@ -21,12 +21,14 @@ def test_intent_router_classifications():
     assert classify_intent("what is 12 * 8") == "math"
     assert classify_intent("2+2") == "math"
 
-    # Live web retrieval is reserved for queries that actually need current
-    # info — general/knowledge queries are served from the model/RAG without
-    # paying for a DDGS round trip on every request.
+    # Live web retrieval covers current_info AND general knowledge — general
+    # questions answered from Qwen memory alone with no grounding produced
+    # confident, fabricated facts (wrong names/dates), so they now always get
+    # a live web check too. Only greeting/doc_query skip it (doc_query is
+    # served from the uploaded-file vector DB instead).
     assert needs_web_search("current_info") is True
+    assert needs_web_search("general") is True
     assert needs_web_search("greeting") is False
-    assert needs_web_search("general") is False
     assert needs_web_search("doc_query") is False
 
 

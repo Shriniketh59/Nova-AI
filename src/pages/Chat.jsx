@@ -168,7 +168,7 @@ export default function Chat() {
       const uploadData = await res.json();
 
       if (!res.ok) {
-        throw new Error(uploadData.error || 'Upload failed');
+        throw new Error(uploadData.detail || uploadData.error || 'Upload failed');
       }
 
       const fileRecord = uploadData.file;

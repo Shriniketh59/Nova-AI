@@ -197,7 +197,7 @@ async def chat_rag(body: ChatRagBody, current_user: dict = Depends(get_current_u
         await db.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3)", [body.chatId, "ai", result["answer"]])
         await db.query("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [body.chatId])
 
-        return {"answer": result["answer"], "sources": result["sources"]}
+        return {"answer": result["answer"], "sources": result["sources"], "conflict": result.get("conflict", False)}
     except Exception as err:
         logger.error("rag.chat.failed", {"chatId": body.chatId, "error": str(err)})
         raise HTTPException(status_code=500, detail="Failed to generate RAG response")

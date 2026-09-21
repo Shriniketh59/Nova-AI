@@ -1,14 +1,14 @@
 import json
 import re
+from datetime import datetime, timezone
 
 import httpx
 
 from ..core.config import OLLAMA_URL, OLLAMA_MODEL, get_ollama_options
-from ..rag import cosine_similarity
+from ..rag import cosine_similarity, generate_embedding
 from .base_agent import BaseAgent
 
 NOT_FOUND_MESSAGE = "Reliable information was not found in the available sources."
-CONFLICT_SIMILARITY_THRESHOLD = 0.3
 
 CRITIQUE_SYSTEM_PROMPT = """You are the Review stage of a critical-thinking AI pipeline. You did not write this answer — your job is to critique it harshly against the evidence it was supposed to be based on.
 
@@ -20,6 +20,7 @@ Check for:
 - Contradictions: does the answer address known source disagreements, or ignore them?
 - Completeness: does the answer address every part of the question, not just one piece of a multi-part ask?
 - Evidence sufficiency: is the evidence too thin to actually support a confident answer (should more sources be retrieved before answering)?
+- Temporal accuracy: for elections, appointments, releases, or any dated event, does the evidence show it as UPCOMING, ONGOING, or COMPLETED? Flag it as an issue if the answer's tense doesn't match — e.g. describing an event with a known result as "expected to happen" or "upcoming" instead of stating the actual outcome. When both a forecast/exit-poll and an official result appear in the evidence, the answer must prefer the official result.
 
 Reply with ONLY a JSON object:
 {
@@ -86,6 +87,30 @@ def _no_evidence(evidence_summary: str) -> bool:
     return not evidence_summary or evidence_summary.strip().startswith(NO_EVIDENCE_PREFIX)
 
 
+# Temporal-status mismatch: an answer using forecast/future language for an
+# event the evidence already shows completed. This is the "described a
+# completed election as upcoming" failure mode — catch it deterministically
+# rather than relying on the LLM judge to always notice on its own.
+_FUTURE_LANGUAGE_RE = re.compile(
+    r"\b(will\s+(be|take\s+place|happen|occur)|is\s+(expected|set|scheduled|slated|predicted|forecast)\s+to|"
+    r"upcoming|is\s+likely\s+to|projected\s+to|due\s+to\s+(happen|occur|take\s+place))\b",
+    re.I,
+)
+_COMPLETION_EVIDENCE_RE = re.compile(
+    r"\b(won|winner|elected|re-elected|appointed|sworn\s+in|inaugurated|announced|declared|"
+    r"result[s]?\s+(were|was|announced|declared)|concluded|held\s+on|took\s+place\s+on|final\s+result)\b",
+    re.I,
+)
+
+
+def _temporal_mismatch(answer: str, evidence_summary: str) -> bool:
+    """True when the answer talks about an event in future/forecast terms
+    while the evidence describes it as already resolved."""
+    if not _FUTURE_LANGUAGE_RE.search(answer or ""):
+        return False
+    return bool(_COMPLETION_EVIDENCE_RE.search(evidence_summary or ""))
+
+
 def _parse_critique(raw: str) -> dict:
     fallback = {"pass": True, "issues": [], "needsMoreEvidence": False, "confidenceScore": 50, "confidenceReason": "Could not parse review output"}
     match = _JSON_OBJ_RE.search(raw)
@@ -104,25 +129,66 @@ def _parse_critique(raw: str) -> dict:
         return fallback
 
 
-def _detect_conflict(chunks: list[dict]) -> dict:
-    """Two chunks from different files that both scored above the retrieval
-    threshold for the same query, but whose embeddings are far apart, are
-    "on-topic but divergent" — a proxy for conflicting information."""
+MAX_CONFLICT_CANDIDATES = 5
+# Two chunks about the same topic have HIGH cosine similarity — near-identical
+# sentences differing only in one fact (e.g. "the deadline is March 1" vs
+# "the deadline is April 1") embed close together, not far apart. So "far
+# apart embeddings" is the wrong signal for conflicting facts; it only
+# catches chunks that are off-topic from each other, which isn't a conflict.
+TOPIC_SIMILARITY_THRESHOLD = 0.5
+
+
+async def _detect_conflict(chunks: list[dict]) -> dict:
+    """Two chunks from different files that are clearly about the same topic
+    (high embedding similarity — same subject/entity) but assert different
+    specific facts (their extracted name/date/number claim-tokens diverge)
+    are a proxy for conflicting information.
+
+    Chunks coming back from the vector-store-backed retrieval path (Chroma,
+    the default backend) never carry a raw "embedding" field — only the
+    in-memory/Postgres fallback path does. Without an on-demand fallback,
+    conflict detection was silently a no-op whenever Chroma answered the
+    query, i.e. in production. generate_embedding is cached, so this costs a
+    real Ollama call only the first time a given chunk's text is seen, and is
+    bounded to a handful of top, distinct-file candidates."""
     distinct_file_chunks = []
     seen_files = set()
     for c in chunks:
-        if not c.get("embedding") or c.get("original_filename") in seen_files:
+        if not c.get("content") or c.get("original_filename") in seen_files:
             continue
         seen_files.add(c["original_filename"])
         distinct_file_chunks.append(c)
+        if len(distinct_file_chunks) >= MAX_CONFLICT_CANDIDATES:
+            break
+
+    embeddings = []
+    for c in distinct_file_chunks:
+        emb = c.get("embedding")
+        if not emb:
+            try:
+                emb = await generate_embedding(c["content"])
+            except Exception:
+                emb = None
+        embeddings.append(emb)
 
     for i in range(len(distinct_file_chunks)):
         for j in range(i + 1, len(distinct_file_chunks)):
-            sim = cosine_similarity(distinct_file_chunks[i]["embedding"], distinct_file_chunks[j]["embedding"])
-            if sim < CONFLICT_SIMILARITY_THRESHOLD:
+            if not embeddings[i] or not embeddings[j]:
+                continue
+            sim = cosine_similarity(embeddings[i], embeddings[j])
+            if sim < TOPIC_SIMILARITY_THRESHOLD:
+                continue  # not even about the same thing — no conflict to surface
+
+            tokens_i = _extract_claim_tokens(distinct_file_chunks[i]["content"])
+            tokens_j = _extract_claim_tokens(distinct_file_chunks[j]["content"])
+            diff = (tokens_i ^ tokens_j)  # symmetric difference: facts asserted by one but not the other
+            if diff:
                 return {
                     "found": True,
-                    "detail": f"{distinct_file_chunks[i]['original_filename']} vs {distinct_file_chunks[j]['original_filename']}",
+                    "detail": (
+                        f"{distinct_file_chunks[i]['original_filename']} vs "
+                        f"{distinct_file_chunks[j]['original_filename']} (differing facts: {', '.join(sorted(diff))})"
+                    ),
                 }
     return {"found": False, "detail": None}
 
@@ -146,7 +212,7 @@ class ValidationAgent(BaseAgent):
                 "output": {"answer": NOT_FOUND_MESSAGE, "evidence": sources, "confidence": confidence, "conflict": False},
             }
 
-        conflict = _detect_conflict(chunks)
+        conflict = await _detect_conflict(chunks)
 
         final_answer = answer
         if conflict["found"]:
@@ -192,6 +258,18 @@ class ValidationAgent(BaseAgent):
                     "needsMoreEvidence": True,
                     "confidenceScore": 20,
                     "confidenceReason": f"Answer entities not well-supported by evidence ({ratio:.0%} grounded).",
+                }
+            if _temporal_mismatch(answer, evidence_summary):
+                return {
+                    "pass": False,
+                    "issues": [
+                        "temporal_mismatch: answer describes the event in future/forecast terms, "
+                        "but the evidence shows it has already been resolved (result/appointment/announcement) — "
+                        "state the actual outcome, not a prediction"
+                    ],
+                    "needsMoreEvidence": False,
+                    "confidenceScore": 25,
+                    "confidenceReason": "Answer tense conflicts with evidence showing the event already completed.",
                 }
 
         if is_code:

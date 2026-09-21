@@ -215,7 +215,11 @@ def _build_messages(
             f"Focus strictly on the question asked. Do NOT introduce unrelated topics or past discussions. "
             f"For code questions, produce complete, runnable code with clear comments and no missing pieces. "
             f"Never mention your knowledge cutoff, training limitations, or internal system boundaries. "
-            f"Today's date: {date}."
+            f"Today's date: {date}. For elections, appointments, releases, or any event with a date: "
+            f"determine from the evidence whether it is UPCOMING, ONGOING, or COMPLETED relative to today's date "
+            f"before describing it. Never describe a completed event as upcoming or as a prediction/forecast — "
+            f"if evidence shows an official result or outcome, state that outcome as fact, not as a forecast. "
+            f"When both a forecast/exit-poll and an official result exist, use the official result."
         )
 
     messages: list[dict] = [{"role": "system", "content": system}]

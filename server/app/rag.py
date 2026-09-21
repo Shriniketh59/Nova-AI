@@ -1,3 +1,4 @@
+import asyncio
 import re
 
 import httpx
@@ -20,20 +21,29 @@ async def generate_embedding(text: str) -> list[float]:
     if cached is not None:
         return cached
 
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            res = await client.post(
-                f"{OLLAMA_URL}/api/embeddings",
-                json={"model": OLLAMA_EMBED_MODEL, "prompt": text},
-            )
-            res.raise_for_status()
-            data = res.json()
-            embedding = data["embedding"]
-            set_cached_embedding(text, embedding)
-            return embedding
-    except Exception as err:
-        logger.error("Embedding generation error", {"error": str(err)})
-        raise
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                res = await client.post(
+                    f"{OLLAMA_URL}/api/embeddings",
+                    json={"model": OLLAMA_EMBED_MODEL, "prompt": text},
+                )
+                res.raise_for_status()
+                data = res.json()
+                embedding = data["embedding"]
+                set_cached_embedding(text, embedding)
+                return embedding
+        except Exception as err:
+            last_err = err
+            # Ollama can transiently 500 under concurrent load (a chat
+            # generation + an embedding call racing for the same model
+            # runner) — a short backoff and retry clears this without
+            # failing the whole upload.
+            if attempt < 2:
+                await asyncio.sleep(0.5 * (attempt + 1))
+    logger.error("Embedding generation error", {"error": str(last_err)})
+    raise last_err
 
 
 def chunk_text(text: str, chunk_size: int = 800, chunk_overlap: int = 150) -> list[str]:
@@ -67,7 +77,38 @@ def chunk_text(text: str, chunk_size: int = 800, chunk_overlap: int = 150) -> li
                     else:
                         if temp_chunk:
                             chunks.append(temp_chunk)
-                        temp_chunk = trimmed_sentence
+                        # A single "sentence" longer than chunk_size (dense
+                        # PDF/table text with no punctuation to split on) has
+                        # no natural break — hard-split it on words so no
+                        # chunk ever exceeds chunk_size and overflows the
+                        # embedding model's context window.
+                        if len(trimmed_sentence) > chunk_size:
+                            words = trimmed_sentence.split(" ")
+                            piece = ""
+                            for word in words:
+                                if len(piece + " " + word) <= chunk_size:
+                                    piece = piece + " " + word if piece else word
+                                else:
+                                    if piece:
+                                        chunks.append(piece)
+                                        piece = ""
+                                    # A single word longer than chunk_size (a URL/
+                                    # token with no spaces at all) can't be handled
+                                    # by truncation without silently dropping the
+                                    # remainder — hard-split the word itself into
+                                    # full chunk_size slices instead.
+                                    if len(word) > chunk_size:
+                                        for i in range(0, len(word), chunk_size):
+                                            sub = word[i:i + chunk_size]
+                                            if len(sub) == chunk_size:
+                                                chunks.append(sub)
+                                            else:
+                                                piece = sub
+                                    else:
+                                        piece = word
+                            temp_chunk = piece
+                        else:
+                            temp_chunk = trimmed_sentence
                 current_chunk = temp_chunk
             else:
                 current_chunk = trimmed_paragraph

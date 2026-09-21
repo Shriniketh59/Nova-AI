@@ -106,8 +106,8 @@ async def test_acceptance_end_to_end_scenarios():
         assert len(kb_res["chunks"]) > 0
         assert any("Qdrant" in c["content"] for c in kb_res["chunks"])
 
-    # 4. Confirmation Llama model remains configured and is NOT replaced
-    assert "llama" in OLLAMA_MODEL.lower()
+    # 4. Confirmation local Qwen model remains configured and is NOT replaced
+    assert "qwen" in OLLAMA_MODEL.lower()
 
     # 5. Confirmation generated answers are NOT stored in project files
     fake_code_answer = "```python\n# FILE: test_generated.py\nprint('hello world')\n```"

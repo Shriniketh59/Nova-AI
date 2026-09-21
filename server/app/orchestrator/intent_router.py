@@ -48,7 +48,7 @@ CURRENT_INFO_RE = re.compile(
     r"\b(latest|current(ly)?|today|right\s+now|this\s+(week|month|year)|"
     r"recent(ly)?|up[-\s]to[-\s]date|as\s+of\s+(now|today)|breaking\s+news|"
     r"live\s+score|stock\s+price|exchange\s+rate|weather|"
-    r"who\s+(is|was|are|were|'s)\s+(the\s+)?(current|new|" + OFFICE_TITLES + r")\b(\s+of\b)?|"
+    r"who\s+(is|was|are|were|'s)\s+(the\s+)?(\w+\s+){0,2}?(current|new|" + OFFICE_TITLES + r")\b(\s+of\b)?|"
     r"who\s+(is|are)\s+(the\s+)?(current|new)\b|"
     r"who\s+won\s+(the\s+)?(election|championship|award|match|game|series|title|race|contest|primary|nomination)|"
     r"election\s+(result|winner|outcome)s?|"
@@ -153,11 +153,12 @@ def is_coding_question(query: str) -> bool:
 
 
 def needs_web_search(intent: str) -> bool:
-    # Only "current_info" queries need a live web search. Doc/knowledge
-    # ("doc_query") and general questions are served from the vector DB /
-    # model directly — hitting DDGS for every general query added latency
-    # and unrelated web noise for no benefit.
-    return intent == "current_info"
+    # "current_info" (time-sensitive/government/office-holder) queries always
+    # need a live web search. "general" knowledge questions also get a live
+    # search — local Qwen memory alone was producing ungrounded/hallucinated
+    # facts (e.g. names, dates) with no evidence to check them against.
+    # Doc/knowledge ("doc_query") queries stay vector-DB-only.
+    return intent in ("current_info", "general")
 
 
 def needs_vector_retrieval(intent: str, has_files: bool = False, has_kb_docs: bool = False) -> bool:

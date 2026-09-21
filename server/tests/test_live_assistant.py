@@ -14,7 +14,7 @@ async def test_local_voice_config():
         assert data["engine"] == "local"
         assert data["stt"] == "faster-whisper"
         assert "espeak-ng" in data["tts"]
-        assert "llama3.2" in data["llm"]
+        assert "qwen" in data["llm"]
         assert data["geminiConfigured"] is False
         assert data["wsEndpoint"] == "/ws/voice/local"
 
